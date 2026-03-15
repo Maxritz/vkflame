@@ -37,30 +37,30 @@ dispatch table and calls the matching Vulkan compute shader.
 
 ## GLSL Compute Kernels (24 shaders)
 
-| Kernel | File | Notes |
-|--------|------|-------|
-| FP16 GEMM | `linear_fp16.glsl` | 16×16 workgroup tiling |
-| INT8 GEMM | `linear_int8.glsl` | `GL_EXT_integer_dot_product`, per-channel scale |
-| Coop-matrix GEMM | `linear_coop.glsl` | `GL_KHR_cooperative_matrix` (RDNA4+) |
-| Flash Attention | `flash_attention.glsl` | MHA, GQA, causal; online softmax across KV tiles |
-| RMS Norm (FP16) | `rms_norm.glsl` | subgroup reduce |
-| RMS Norm (FP32) | `rms_norm_f32.glsl` | ggml f32 path |
-| Online Softmax | `softmax_online.glsl` | numerically stable, subgroup merge |
-| Dequant Q4_0 | `dequant_q4_0.glsl` | ggml block format |
-| Dequant Q4_1 | `dequant_q4_1.glsl` | |
-| Dequant Q4_K | `dequant_q4_k.glsl` | |
-| Dequant Q5_0 | `dequant_q5_0.glsl` | |
-| Dequant Q5_K | `dequant_q5_k.glsl` | |
-| Dequant Q6_K | `dequant_q6_k.glsl` | |
-| Dequant Q8_0 | `dequant_q8_0.glsl` | |
-| Elementwise FP32 | `elementwise_f32.glsl` | silu, gelu (erf), relu, tanh |
-| Binary Op FP32 | `binop_f32.glsl` | add, mul, sub, div |
-| RoPE NeoX | `rope_neox.glsl` | rotary position embedding |
-| Scale FP32 | `scale_f32.glsl` | in-place scale |
-| Top-K | `topk.glsl` | selection sort, largest/smallest |
-| Embedding | `embedding.glsl` | vocab lookup, bounds-checked |
-| KV-Cache Update | `kvcache_update.glsl` | in-place seq_pos write |
-| Winograd F(2,3) | `winograd_f23.glsl` + `winograd_filter_transform.glsl` | 3×3 conv |
+| Kernel           | File                                                   | Notes                                            |
+| ---------------- | ------------------------------------------------------ | ------------------------------------------------ |
+| FP16 GEMM        | `linear_fp16.glsl`                                     | 16×16 workgroup tiling                           |
+| INT8 GEMM        | `linear_int8.glsl`                                     | `GL_EXT_integer_dot_product`, per-channel scale  |
+| Coop-matrix GEMM | `linear_coop.glsl`                                     | `GL_KHR_cooperative_matrix` (RDNA4+)             |
+| Flash Attention  | `flash_attention.glsl`                                 | MHA, GQA, causal; online softmax across KV tiles |
+| RMS Norm (FP16)  | `rms_norm.glsl`                                        | subgroup reduce                                  |
+| RMS Norm (FP32)  | `rms_norm_f32.glsl`                                    | ggml f32 path                                    |
+| Online Softmax   | `softmax_online.glsl`                                  | numerically stable, subgroup merge               |
+| Dequant Q4_0     | `dequant_q4_0.glsl`                                    | ggml block format                                |
+| Dequant Q4_1     | `dequant_q4_1.glsl`                                    |                                                  |
+| Dequant Q4_K     | `dequant_q4_k.glsl`                                    |                                                  |
+| Dequant Q5_0     | `dequant_q5_0.glsl`                                    |                                                  |
+| Dequant Q5_K     | `dequant_q5_k.glsl`                                    |                                                  |
+| Dequant Q6_K     | `dequant_q6_k.glsl`                                    |                                                  |
+| Dequant Q8_0     | `dequant_q8_0.glsl`                                    |                                                  |
+| Elementwise FP32 | `elementwise_f32.glsl`                                 | silu, gelu (erf), relu, tanh                     |
+| Binary Op FP32   | `binop_f32.glsl`                                       | add, mul, sub, div                               |
+| RoPE NeoX        | `rope_neox.glsl`                                       | rotary position embedding                        |
+| Scale FP32       | `scale_f32.glsl`                                       | in-place scale                                   |
+| Top-K            | `topk.glsl`                                            | selection sort, largest/smallest                 |
+| Embedding        | `embedding.glsl`                                       | vocab lookup, bounds-checked                     |
+| KV-Cache Update  | `kvcache_update.glsl`                                  | in-place seq_pos write                           |
+| Winograd F(2,3)  | `winograd_f23.glsl` + `winograd_filter_transform.glsl` | 3×3 conv                                         |
 
 ---
 
@@ -122,6 +122,7 @@ cmake --build build
 ```
 
 Output DLLs are in `build\Release\`:
+
 - `vkflame_rt.dll`
 - `amdhip64_6.dll`
 - `hipblas.dll`
@@ -256,4 +257,3 @@ vkflame/
 ## License
 
 MIT
-

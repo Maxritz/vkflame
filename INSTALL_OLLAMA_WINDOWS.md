@@ -69,6 +69,7 @@ description="AMD Radeon RX 9070 XT" total="15.9 GiB" available="14.5 GiB"
 ```
 
 Key things to confirm:
+
 - `library=ROCm` — not `library=cpu`
 - `compute=gfxXXXX` — your GPU arch is recognised
 - `total=` shows your actual VRAM
@@ -107,6 +108,7 @@ Should print `exports: 481` (or more). If it shows `0`, you have the old DLL sti
 
 Run `ollama serve` from a terminal (not the tray icon) to see full stderr output.
 Common causes:
+
 - Missing `vkflame_rt.dll` in the rocm directory (all 4 must be present together)
 - Vulkan driver not installed — run `vulkaninfo` to verify
 
