@@ -74,14 +74,31 @@ dispatch table and calls the matching Vulkan compute shader.
 
 ---
 
-## Quickstart: Ollama on Windows (prebuilt DLLs)
+## Do I need vkflame?
+
+| Situation | Do you need vkflame? |
+|-----------|---------------------|
+| Standard Ollama installer + any GPU | **No** — set `OLLAMA_VULKAN=1`, done |
+| AMD bundle Ollama (ROCm path) on non-RDNA4 GPU | **Yes** — its ROCm DLLs refuse to run |
+| AMD bundle Ollama on RDNA4 (RX 9070 XT etc.) | **No** — original ROCm DLLs work fine |
+| llama.cpp HIP build, PyTorch ROCm wheels | **Yes** — vkflame is their only Vulkan path |
+| Any other ROCm-compiled binary on non-AMD/non-ROCm hardware | **Yes** |
+
+**One-line rule:** if the program was compiled against the ROCm/HIP SDK and you don't have a supported AMD GPU with a real ROCm driver, vkflame is what makes it run.
+
+---
+
+## Quickstart: AMD bundle Ollama on Windows (prebuilt DLLs)
+
+The AMD bundle Ollama ships ROCm DLLs that only work on RDNA4. vkflame replaces
+them so the ROCm path works on any Vulkan 1.3 GPU.
 
 **No build required.** Download the release zip and drop the DLLs in.
 
 1. Download `vkflame-windows-x64.zip` from [Releases](../../releases)
 2. Find your Ollama ROCm directory:
-   - Standard installer: `%LOCALAPPDATA%\Programs\Ollama\lib\ollama\rocm\`
    - AMD bundle installer: `%LOCALAPPDATA%\AMD\AI_Bundle\Ollama\lib\ollama\rocm\`
+   - Standard installer: `%LOCALAPPDATA%\Programs\Ollama\lib\ollama\rocm\`
 3. Copy all four DLLs there (overwrite the originals — **back them up first**):
    ```
    amdhip64_6.dll
@@ -89,16 +106,13 @@ dispatch table and calls the matching Vulkan compute shader.
    hipblaslt.dll
    vkflame_rt.dll
    ```
-4. Start Ollama:
+4. For non-RDNA4 GPUs, set the arch before starting Ollama (see GPU table below)
+5. Start Ollama:
    ```
    ollama serve
    ```
-   Look for this line in the log:
-   ```
-   inference compute id=0 library=ROCm compute=gfx1201 name=ROCm0
-   description="AMD Radeon RX 9070 XT" total="15.9 GiB" available="14.5 GiB"
-   ```
-5. Run a model:
+   Success: log shows `library=ROCm` (not `library=cpu` or `library=Vulkan`)
+6. Run a model:
    ```
    ollama run deepseek-r1:14b
    ```
@@ -205,6 +219,7 @@ source ~/.config/vkflame/env.sh    # or open a new terminal
 
 ## What works
 
+- Full ROCm/HIP ABI: any ROCm-compiled binary loads vkflame's DLLs instead of real ROCm
 - GPU detection: `hipGetDeviceProperties` returns correct arch, VRAM, subgroup size
 - Memory: `hipMalloc` / `hipFree` / `hipMemcpy` (H2D, D2H, D2D) / `hipMemset`
 - Synchronisation: streams, events, `hipDeviceSynchronize`
@@ -215,7 +230,8 @@ source ~/.config/vkflame/env.sh    # or open a new terminal
 - Flash Attention (MHA, GQA, causal mask)
 - Top-K, Embedding, KV-cache update
 - PyTorch aten op dispatch (mm, addmm, linear, sdpa, layer_norm, softmax, ...)
-- **Ollama full model offload on Windows (confirmed RX 9070 XT gfx1201)**
+- **Confirmed: AMD bundle Ollama full model offload, RX 9070 XT (gfx1201), 49/49 layers**
+- **Confirmed: standard Ollama Vulkan path works without vkflame on RDNA2/3 with `OLLAMA_VULKAN=1`**
 
 ## What does not work yet
 
