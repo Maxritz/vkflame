@@ -395,8 +395,33 @@ def _gelu_handler(x: torch.Tensor, approximate: str = "none") -> torch.Tensor:
     return _activation_handler(x, 3)
 
 
-def _elementwise(op_func, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    raise NotImplementedError("elementwise fallthrough")
+# Binary op codes — must match VKF_BINOP_* in dispatch.h
+_BINOP_ADD = 0
+_BINOP_MUL = 1
+_BINOP_SUB = 2
+_BINOP_DIV = 3
+
+
+def _binop_handler(
+    a: torch.Tensor, b: torch.Tensor, op_id: int, alpha: float = 1.0
+) -> torch.Tensor:
+    """GPU element-wise binary op via binop_f32.glsl; handles broadcasting."""
+    if a.dtype not in _ACCEL_DTYPES:
+        raise NotImplementedError
+    # binop_f32.glsl is fp32-only; convert inputs and restore original dtype on output
+    b_scaled = b if alpha == 1.0 else b * alpha
+    a_f32 = a.to(torch.float32).contiguous()
+    b_f32 = b_scaled.to(torch.float32).contiguous()
+    # Expand to common broadcast shape so both buffers have identical element counts
+    out_shape = torch.broadcast_shapes(a_f32.shape, b_f32.shape)
+    a_bc = a_f32.expand(out_shape).contiguous()
+    b_bc = b_f32.expand(out_shape).contiguous()
+    n = a_bc.numel()
+    rt, ctx = _ensure_runtime()
+    out_f32 = torch.empty(out_shape, dtype=torch.float32, device=a.device)
+    with _staged(rt, [a_bc, b_bc], out_f32) as (in_args, out_arg):
+        rt.vkflame_dispatch_binop_f32(ctx, in_args[0], in_args[1], out_arg, n, n, op_id)
+    return out_f32.to(a.dtype)
 
 
 # ── Handler map ────────────────────────────────────────────────────
@@ -416,9 +441,10 @@ def build_handler_map() -> dict:
         ("addmm.default",                           _addmm_handler),
         ("linear.default",                          _linear_handler),
         ("scaled_dot_product_attention.default",    _sdpa_handler),
-        ("native_layer_norm.default",                _rms_norm_handler),
-        # softmax: prefer the low-level _softmax.default; skip .Tensor if absent
+        ("native_layer_norm.default",               _rms_norm_handler),
+        # softmax: both overloads — _softmax.default (low-level) + softmax.Tensor (F.softmax)
         ("_softmax.default",                        _softmax_aten_handler),
+        ("softmax.Tensor",   lambda x, dim, dtype=None: _softmax_handler(x, dim)),
         ("relu.default",                            _relu_handler),
         ("silu.default",                            _silu_handler),
         ("gelu.default",                            _gelu_handler),
@@ -426,12 +452,11 @@ def build_handler_map() -> dict:
         ("topk.default",                            _topk_handler),
         ("argmax.default",                          _argmax_handler),
         ("multinomial.replacement",                 _multinomial_handler),
-        ("cumsum.default",                          _cumsum_handler),
-        ("sort.default",                            _sort_handler),
-        ("add.Tensor",    lambda a, b, alpha=1: _elementwise(None, a, b)),
-        ("mul.Tensor",    lambda a, b: _elementwise(None, a, b)),
-        ("sub.Tensor",    lambda a, b, alpha=1: _elementwise(None, a, b)),
-        ("div.Tensor",    lambda a, b: _elementwise(None, a, b)),
+        # cumsum / sort: no GPU kernel yet — omitted so PyTorch handles them silently
+        ("add.Tensor",    lambda a, b, alpha=1: _binop_handler(a, b, _BINOP_ADD, alpha)),
+        ("mul.Tensor",    lambda a, b: _binop_handler(a, b, _BINOP_MUL)),
+        ("sub.Tensor",    lambda a, b, alpha=1: _binop_handler(a, b, _BINOP_SUB, alpha)),
+        ("div.Tensor",    lambda a, b: _binop_handler(a, b, _BINOP_DIV)),
     ]
 
     result: dict = {}

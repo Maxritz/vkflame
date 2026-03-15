@@ -50,6 +50,7 @@ If the target machine has any GPU with Vulkan 1.3, it runs.
 | Kernel           | File                                                   | Notes                                            |
 | ---------------- | ------------------------------------------------------ | ------------------------------------------------ |
 | FP16 GEMM        | `linear_fp16.glsl`                                     | 16×16 workgroup tiling                           |
+| FP16→FP32 GEMM   | `linear_fp16_fp32out.glsl`                             | fp16 inputs, fp32 output (`hipblasGemmEx` path)  |
 | INT8 GEMM        | `linear_int8.glsl`                                     | `GL_EXT_integer_dot_product`, per-channel scale  |
 | Coop-matrix GEMM | `linear_coop.glsl`                                     | `GL_KHR_cooperative_matrix` (RDNA4+)             |
 | Flash Attention  | `flash_attention.glsl`                                 | MHA, GQA, causal; online softmax across KV tiles |
@@ -254,14 +255,14 @@ with vkflame.install():
 
 These features are on the roadmap. PRs welcome.
 
-| Feature | Notes |
-| --- | --- |
-| FP8 weights | Needs `VK_KHR_shader_float8` — not yet in Mesa/AMDVLK; shaders written, gated on driver |
-| BFloat16 kernels | Needed for Llama3/Mistral native weights; GLSL compiler support landed in 2025 |
-| Async compute | All dispatch is currently synchronous (submit+wait); needs timeline semaphores |
-| `hipblaslt` workspace hints | Some callers pass workspace size > 0; vkflame ignores it today |
-| IQ2 / IQ3 / IQ4 ggml formats | Activations skipped with log warning; full dequant shaders needed |
-| Multi-GPU | Single device only today; VkPhysicalDevice enumeration exists, selection does not |
+| Feature                      | Notes                                                                                   |
+| ---------------------------- | --------------------------------------------------------------------------------------- |
+| FP8 weights                  | Needs `VK_KHR_shader_float8` — not yet in Mesa/AMDVLK; shaders written, gated on driver |
+| BFloat16 kernels             | Needed for Llama3/Mistral native weights; GLSL compiler support landed in 2025          |
+| Async compute                | All dispatch is currently synchronous (submit+wait); needs timeline semaphores          |
+| `hipblaslt` workspace hints  | Some callers pass workspace size > 0; vkflame ignores it today                          |
+| IQ2 / IQ3 / IQ4 ggml formats | Activations skipped with log warning; full dequant shaders needed                       |
+| Multi-GPU                    | Single device only today; VkPhysicalDevice enumeration exists, selection does not       |
 
 ## Out of scope
 
