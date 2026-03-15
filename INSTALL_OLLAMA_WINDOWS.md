@@ -12,8 +12,26 @@ This guide gets Ollama running with full GPU acceleration on any Vulkan 1.3 GPU
   - AMD: RX 6000 series (RDNA2) or newer
   - NVIDIA: RTX 20 series or newer
   - Intel: Arc A-series or newer
-- [Ollama for Windows](https://ollama.com/download/windows) — the AMD/ROCm bundle version
+- [Ollama for Windows](https://ollama.com/download/windows) — standard installer **or** AMD bundle, both work
 - The vkflame DLLs (download from [Releases](../../releases))
+
+---
+
+## Finding your Ollama rocm folder
+
+Ollama installs to different locations depending on which package you used.
+Run this once to find yours:
+
+```powershell
+$candidates = @(
+    "$env:LOCALAPPDATA\Programs\Ollama\lib\ollama\rocm",
+    "$env:LOCALAPPDATA\AMD\AI_Bundle\Ollama\lib\ollama\rocm"
+)
+$rocmDir = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($rocmDir) { Write-Host "Found: $rocmDir" } else { Write-Host "Not found — is Ollama installed?" }
+```
+
+Use the printed path in all the steps below.
 
 ---
 
@@ -22,8 +40,13 @@ This guide gets Ollama running with full GPU acceleration on any Vulkan 1.3 GPU
 Before replacing anything, back up the originals.
 
 ```powershell
-$rocmDir = "$env:LOCALAPPDATA\AMD\AI_Bundle\Ollama\lib\ollama\rocm"
-$backup  = "$rocmDir\backup_original"
+# Auto-detect path (or set manually)
+$rocmDir = @(
+    "$env:LOCALAPPDATA\Programs\Ollama\lib\ollama\rocm",
+    "$env:LOCALAPPDATA\AMD\AI_Bundle\Ollama\lib\ollama\rocm"
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+$backup = "$rocmDir\backup_original"
 New-Item -ItemType Directory -Force -Path $backup
 Copy-Item "$rocmDir\amdhip64_6.dll" $backup
 Copy-Item "$rocmDir\hipblas.dll"    $backup
@@ -38,7 +61,11 @@ Write-Host "Backup saved to $backup"
 Extract `vkflame-windows-x64.zip` and copy the four files:
 
 ```powershell
-$rocmDir  = "$env:LOCALAPPDATA\AMD\AI_Bundle\Ollama\lib\ollama\rocm"
+# Auto-detect path (or set manually)
+$rocmDir  = @(
+    "$env:LOCALAPPDATA\Programs\Ollama\lib\ollama\rocm",
+    "$env:LOCALAPPDATA\AMD\AI_Bundle\Ollama\lib\ollama\rocm"
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
 $vkflame  = "C:\path\to\extracted\vkflame-windows-x64"
 
 Copy-Item "$vkflame\amdhip64_6.dll"  $rocmDir -Force
@@ -81,15 +108,16 @@ Key things to confirm:
 vkflame defaults to `gfx1201` (RDNA4, RX 9070/9070 XT). If you have a different GPU,
 set `HSA_OVERRIDE_GFX_VERSION` before launching Ollama:
 
-| GPU | Setting |
-|-----|---------|
-| RX 9070 / 9070 XT (RDNA4) | Nothing needed |
+| GPU                                  | Setting                           |
+| ------------------------------------ | --------------------------------- |
+| RX 9070 / 9070 XT (RDNA4)            | Nothing needed                    |
 | RX 7900 / 7800 / 7700 / 7600 (RDNA3) | `HSA_OVERRIDE_GFX_VERSION=11.0.0` |
 | RX 6900 / 6800 / 6700 / 6600 (RDNA2) | `HSA_OVERRIDE_GFX_VERSION=10.3.0` |
-| RX 6500 / 6400 (RDNA2 lite) | `HSA_OVERRIDE_GFX_VERSION=10.1.3` |
-| Explicit override | `VKFLAME_GFX_ARCH=gfxXXXX` |
+| RX 6500 / 6400 (RDNA2 lite)          | `HSA_OVERRIDE_GFX_VERSION=10.1.3` |
+| Explicit override                    | `VKFLAME_GFX_ARCH=gfxXXXX`        |
 
 Set it in PowerShell before starting Ollama:
+
 ```powershell
 $env:HSA_OVERRIDE_GFX_VERSION = "11.0.0"
 ollama serve
@@ -117,9 +145,13 @@ For smaller GPUs use a smaller quantisation (`deepseek-r1:7b`, `:1.5b`, etc.).
 Check DLL exports — Windows won't load a DLL that's missing required exports:
 
 ```powershell
-C:\TR\.venv\Scripts\python.exe -c "
+$rocmDir = @(
+    "$env:LOCALAPPDATA\Programs\Ollama\lib\ollama\rocm",
+    "$env:LOCALAPPDATA\AMD\AI_Bundle\Ollama\lib\ollama\rocm"
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+python -c "
 import pefile
-p = pefile.PE(r'$env:LOCALAPPDATA\AMD\AI_Bundle\Ollama\lib\ollama\rocm\amdhip64_6.dll')
+p = pefile.PE(r'$rocmDir\amdhip64_6.dll')
 exp = len(p.DIRECTORY_ENTRY_EXPORT.symbols) if hasattr(p,'DIRECTORY_ENTRY_EXPORT') else 0
 print(f'amdhip64_6.dll exports: {exp}')
 "
@@ -148,7 +180,10 @@ Must show your GPU. If it doesn't, install/update the graphics driver.
 ## Reverting to original DLLs
 
 ```powershell
-$rocmDir = "$env:LOCALAPPDATA\AMD\AI_Bundle\Ollama\lib\ollama\rocm"
+$rocmDir = @(
+    "$env:LOCALAPPDATA\Programs\Ollama\lib\ollama\rocm",
+    "$env:LOCALAPPDATA\AMD\AI_Bundle\Ollama\lib\ollama\rocm"
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
 $backup  = "$rocmDir\backup_original"
 Copy-Item "$backup\amdhip64_6.dll" $rocmDir -Force
 Copy-Item "$backup\hipblas.dll"    $rocmDir -Force

@@ -79,10 +79,9 @@ dispatch table and calls the matching Vulkan compute shader.
 **No build required.** Download the release zip and drop the DLLs in.
 
 1. Download `vkflame-windows-x64.zip` from [Releases](../../releases)
-2. Find your Ollama ROCm directory — typically:
-   ```
-   %LOCALAPPDATA%\AMD\AI_Bundle\Ollama\lib\ollama\rocm\
-   ```
+2. Find your Ollama ROCm directory:
+   - Standard installer: `%LOCALAPPDATA%\Programs\Ollama\lib\ollama\rocm\`
+   - AMD bundle installer: `%LOCALAPPDATA%\AMD\AI_Bundle\Ollama\lib\ollama\rocm\`
 3. Copy all four DLLs there (overwrite the originals — **back them up first**):
    ```
    amdhip64_6.dll
@@ -112,15 +111,16 @@ and troubleshooting.
 vkflame defaults to `gfx1201` (RDNA4). For other GPUs set one of these env vars
 **before** starting Ollama:
 
-| GPU family | Env var to set |
-|-----------|----------------|
-| RX 9070 / 9070 XT (RDNA4, gfx1201) | Nothing — default |
+| GPU family                                    | Env var to set                    |
+| --------------------------------------------- | --------------------------------- |
+| RX 9070 / 9070 XT (RDNA4, gfx1201)            | Nothing — default                 |
 | RX 7900 / 7800 / 7700 / 7600 (RDNA3, gfx1100) | `HSA_OVERRIDE_GFX_VERSION=11.0.0` |
 | RX 6900 / 6800 / 6700 / 6600 (RDNA2, gfx1030) | `HSA_OVERRIDE_GFX_VERSION=10.3.0` |
-| RX 6500 / 6400 (RDNA2, gfx1013) | `HSA_OVERRIDE_GFX_VERSION=10.1.3` |
-| Any GPU (explicit override) | `VKFLAME_GFX_ARCH=gfxXXXX` |
+| RX 6500 / 6400 (RDNA2, gfx1013)               | `HSA_OVERRIDE_GFX_VERSION=10.1.3` |
+| Any GPU (explicit override)                   | `VKFLAME_GFX_ARCH=gfxXXXX`        |
 
 On Windows set env vars in PowerShell before launching Ollama:
+
 ```powershell
 $env:HSA_OVERRIDE_GFX_VERSION = "11.0.0"
 ollama serve
