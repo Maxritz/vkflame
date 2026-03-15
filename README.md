@@ -107,6 +107,27 @@ dispatch table and calls the matching Vulkan compute shader.
 See [INSTALL_OLLAMA_WINDOWS.md](INSTALL_OLLAMA_WINDOWS.md) for detailed steps
 and troubleshooting.
 
+### GPU compatibility (non-RDNA4)
+
+vkflame defaults to `gfx1201` (RDNA4). For other GPUs set one of these env vars
+**before** starting Ollama:
+
+| GPU family | Env var to set |
+|-----------|----------------|
+| RX 9070 / 9070 XT (RDNA4, gfx1201) | Nothing — default |
+| RX 7900 / 7800 / 7700 / 7600 (RDNA3, gfx1100) | `HSA_OVERRIDE_GFX_VERSION=11.0.0` |
+| RX 6900 / 6800 / 6700 / 6600 (RDNA2, gfx1030) | `HSA_OVERRIDE_GFX_VERSION=10.3.0` |
+| RX 6500 / 6400 (RDNA2, gfx1013) | `HSA_OVERRIDE_GFX_VERSION=10.1.3` |
+| Any GPU (explicit override) | `VKFLAME_GFX_ARCH=gfxXXXX` |
+
+On Windows set env vars in PowerShell before launching Ollama:
+```powershell
+$env:HSA_OVERRIDE_GFX_VERSION = "11.0.0"
+ollama serve
+```
+
+Or permanently in System → Advanced → Environment Variables.
+
 ---
 
 ## Build from source

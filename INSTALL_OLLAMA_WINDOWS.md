@@ -76,7 +76,30 @@ Key things to confirm:
 
 ---
 
-## Step 4 — Run a model
+## Step 4 — Set GPU arch for non-RDNA4 GPUs
+
+vkflame defaults to `gfx1201` (RDNA4, RX 9070/9070 XT). If you have a different GPU,
+set `HSA_OVERRIDE_GFX_VERSION` before launching Ollama:
+
+| GPU | Setting |
+|-----|---------|
+| RX 9070 / 9070 XT (RDNA4) | Nothing needed |
+| RX 7900 / 7800 / 7700 / 7600 (RDNA3) | `HSA_OVERRIDE_GFX_VERSION=11.0.0` |
+| RX 6900 / 6800 / 6700 / 6600 (RDNA2) | `HSA_OVERRIDE_GFX_VERSION=10.3.0` |
+| RX 6500 / 6400 (RDNA2 lite) | `HSA_OVERRIDE_GFX_VERSION=10.1.3` |
+| Explicit override | `VKFLAME_GFX_ARCH=gfxXXXX` |
+
+Set it in PowerShell before starting Ollama:
+```powershell
+$env:HSA_OVERRIDE_GFX_VERSION = "11.0.0"
+ollama serve
+```
+
+Or add it permanently in: System Properties → Advanced → Environment Variables.
+
+---
+
+## Step 5 — Run a model
 
 ```
 ollama run deepseek-r1:14b
