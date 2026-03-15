@@ -91,6 +91,7 @@ _DTYPE_MAP = {
     torch.int8:     2,
     torch.bfloat16: 3,
 }
+_DTYPE_FP16_FP32OUT = 4  # fp16 A/B → fp32 D (fp32 accumulation for precision)
 
 
 def _dtype_to_int(dt: torch.dtype) -> int:
@@ -223,20 +224,41 @@ def _staged(
                       file=sys.stderr)
 
     # ── (3) Staged fallback ────────────────────────────────────────────────
+    _has_batch = hasattr(rt, 'vkflame_batch_begin')
     in_bufs: list[Optional[_VulkanBuf]] = []
+    cpu_out: Optional[torch.Tensor] = None  # kept alive on Windows+CUDA until after batch_end
+    if _has_batch:
+        rt.vkflame_batch_begin()
     for t in inputs:
         if t is None:
             in_bufs.append(None)
         else:
             b = _VulkanBuf(rt, t.nbytes)
-            b.upload(t)
+            b.upload(t)  # in batch mode: records h2d copy, no submit
             in_bufs.append(b)
     out_buf = _VulkanBuf(rt, output.nbytes)
     try:
         in_args = [b.as_arg if b is not None else ctypes.c_void_p(0) for b in in_bufs]
         yield in_args, out_buf.as_arg
-        out_buf.download_into(output)
+        # Dispatch was recorded in batch CB (or submitted immediately if no batch).
+        if _has_batch:
+            # Record d2h; keep cpu_out alive until after vkflame_batch_end().
+            if output.is_cuda:
+                cpu_out = torch.empty(output.numel(), dtype=output.dtype, device='cpu')
+                rt.vkflame_memcpy_d2h(
+                    ctypes.c_void_p(cpu_out.data_ptr()), out_buf._buf_ptr,
+                    out_buf._nbytes, 0)
+            else:
+                rt.vkflame_memcpy_d2h(
+                    ctypes.c_void_p(output.data_ptr()), out_buf._buf_ptr,
+                    out_buf._nbytes, 0)
+        else:
+            out_buf.download_into(output)
     finally:
+        if _has_batch:
+            rt.vkflame_batch_end()  # one submit+wait; then staging → cpu_out memcpy
+            if cpu_out is not None:
+                output.copy_(cpu_out.view_as(output))
         for b in in_bufs:
             if b is not None:
                 b.free()

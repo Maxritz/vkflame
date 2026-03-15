@@ -24,6 +24,12 @@ ollama_run*.txt
 ollama_stderr.txt
 ollama_stdout.txt
 
+# Benchmark output scratch files
+bench_out.txt
+bench_stdout.txt
+bench_stderr.txt
+tools/bench_err.txt
+
 # Debug / session scratch scripts
 debug_mm.py
 check_imports.ps1

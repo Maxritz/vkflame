@@ -200,11 +200,22 @@ extern "C"
         // ── Subgroup size ────────────────────────────────────────────
         VkPhysicalDeviceSubgroupProperties sg_props = {};
         sg_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+        // VK_EXT_subgroup_size_control is core in Vulkan 1.3.
+        // On RDNA4 (gfx1201) the driver reports subgroupSize=64 but the
+        // actual wavefront width is 32 — minSubgroupSize reveals this.
+        VkPhysicalDeviceSubgroupSizeControlProperties sg_ctrl = {};
+        sg_ctrl.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES;
+        sg_props.pNext = &sg_ctrl;
         VkPhysicalDeviceProperties2 props2 = {};
         props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
         props2.pNext = &sg_props;
         vkGetPhysicalDeviceProperties2(g_ctx.physical_device, &props2);
-        g_ctx.features.subgroup_size = sg_props.subgroupSize;
+        // Prefer minSubgroupSize when it differs from the reported subgroupSize
+        // (wave32 hardware reported as subgroup 64 by AMD RDNA4 drivers).
+        g_ctx.features.subgroup_size =
+            (sg_ctrl.minSubgroupSize > 0 && sg_ctrl.minSubgroupSize < sg_props.subgroupSize)
+                ? sg_ctrl.minSubgroupSize
+                : sg_props.subgroupSize;
 
         // ── Feature detection ────────────────────────────────────────
         VkPhysicalDeviceFeatures2 feat2 = {};

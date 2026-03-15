@@ -89,8 +89,14 @@ except Exception as e:
 
 
 # ── Timing helpers ─────────────────────────────────────────────────
-_N_WARMUP = 10
-_N_BENCH  = 50
+_N_WARMUP = 5
+_N_BENCH  = 20
+
+# Windows TDR guard: cap total benchmark wall time per shape to ~4 seconds.
+# Each dispatch on our Vulkan path is a synchronous submit+wait, so the GPU
+# is idle between calls. But if a single kernel takes >200ms, 20 iterations
+# × 200ms = 4 seconds of continuous GPU activity, which can stall the display.
+_MAX_BENCH_SECS = 3.0
 
 
 def _sync() -> None:
@@ -98,22 +104,27 @@ def _sync() -> None:
 
 
 def _measure_ms(fn: Callable, n_warmup: int = _N_WARMUP, n_bench: int = _N_BENCH) -> float:
-    """Return average latency in ms.
+    """Return median latency in ms.
 
-    Uses a single sync wrapping all iterations so the GPU stays loaded
-    throughout — per-iter sync starves the queue and hangs on ROCm/Windows.
+    Uses per-iteration timing so large-K shapes don't accumulate into a
+    multi-second GPU hold that triggers Windows TDR / display stall.
     """
     for _ in range(n_warmup):
         fn()
     _sync()
 
-    t0 = time.perf_counter()
+    times = []
+    deadline = time.perf_counter() + _MAX_BENCH_SECS
     for _ in range(n_bench):
+        t0 = time.perf_counter()
         fn()
-    _sync()
-    t1 = time.perf_counter()
+        _sync()
+        times.append((time.perf_counter() - t0) * 1000.0)
+        if time.perf_counter() >= deadline:
+            break
 
-    return (t1 - t0) * 1000.0 / n_bench
+    times.sort()
+    return times[len(times) // 2]  # median
 
 
 def _tflops(flops: float, ms: float) -> str:

@@ -54,6 +54,14 @@ extern "C"
     int vkflame_memcpy_d2d(VKFBuffer *dst, VKFBuffer *src, size_t size);
     int vkflame_memset(VKFBuffer *buf, int value, size_t size);
 
+    // ── Command-buffer batching ──────────────────────────────────────────
+    // Call vkflame_batch_begin() before a group of uploads + dispatch + downloads.
+    // All three operations will be recorded into a single VkCommandBuffer and
+    // submitted once via vkflame_batch_end(), reducing vkQueueSubmit overhead
+    // from 3 submits per op to 1 (≈ 3× faster on Windows WDDM).
+    void vkflame_batch_begin();
+    void vkflame_batch_end();
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

@@ -9,8 +9,8 @@ layout(local_size_x = 16, local_size_y = 16) in;
 
 layout(set = 0, binding = 0) readonly  buffer BufA { float16_t a[]; };
 layout(set = 0, binding = 1) readonly  buffer BufB { float16_t b[]; };
-layout(set = 0, binding = 2) readonly  buffer BufC { float     c[]; };  // fp32 bias (unused)
-layout(set = 0, binding = 3) writeonly buffer BufD { float     d[]; };  // fp32 output
+layout(set = 0, binding = 2) readonly  buffer BufC { float16_t c[]; };  // bias (unused)
+layout(set = 0, binding = 3) writeonly buffer BufD { float16_t d[]; };  // fp16 output
 
 layout(push_constant) uniform PC {
     uint M;
@@ -46,5 +46,5 @@ void main() {
     for (uint k = 0u; k < pc.K; k++)
         acc += float(a[row * pc.K + k]) * float(b[k * pc.N + col]);
 
-    d[row * pc.N + col] = apply_act(acc);  // write float32, not float16_t
+    d[row * pc.N + col] = float16_t(apply_act(acc));  // accumulate fp32, write fp16
 }

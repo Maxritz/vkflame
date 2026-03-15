@@ -96,6 +96,12 @@ struct DispatchArgs
     uint32_t gx, gy, gz;
 };
 
+// Batch helpers — defined in buffer.cpp, same shared library.
+extern bool vkf_batch_active();
+extern VkCommandBuffer vkf_batch_cb();
+extern void vkf_batch_pre_compute_barrier();
+extern void vkf_batch_defer_pool(VkDescriptorPool pool);
+
 static void do_dispatch(const DispatchArgs &args)
 {
     VKFContext *ctx = vkflame_get_context();
@@ -108,20 +114,29 @@ static void do_dispatch(const DispatchArgs &args)
 
     VkDevice dev = ctx->device;
 
-    // ── Allocate command buffer ────────────────────────────────
-    VkCommandBufferAllocateInfo alloc_info{};
-    alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    alloc_info.commandPool = ctx->command_pool;
-    alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    alloc_info.commandBufferCount = 1;
+    // ── Command buffer: reuse batch CB or allocate a fresh one ──────
+    bool batch = vkf_batch_active();
     VkCommandBuffer cmd{};
-    VKF_CHECK(vkAllocateCommandBuffers(dev, &alloc_info, &cmd));
+    if (batch)
+    {
+        cmd = vkf_batch_cb();
+        // Insert TRANSFER→COMPUTE barrier when h2d uploads preceded this dispatch.
+        vkf_batch_pre_compute_barrier();
+    }
+    else
+    {
+        VkCommandBufferAllocateInfo alloc_info{};
+        alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        alloc_info.commandPool = ctx->command_pool;
+        alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        alloc_info.commandBufferCount = 1;
+        VKF_CHECK(vkAllocateCommandBuffers(dev, &alloc_info, &cmd));
 
-    // ── Begin recording ────────────────────────────────────────
-    VkCommandBufferBeginInfo begin_info{};
-    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    VKF_CHECK(vkBeginCommandBuffer(cmd, &begin_info));
+        VkCommandBufferBeginInfo begin_info{};
+        begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        VKF_CHECK(vkBeginCommandBuffer(cmd, &begin_info));
+    }
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe->pipeline);
 
@@ -179,6 +194,15 @@ static void do_dispatch(const DispatchArgs &args)
 
     // ── Dispatch ───────────────────────────────────────────────
     vkCmdDispatch(cmd, args.gx, args.gy, args.gz);
+
+    // ── Submit/cleanup or defer in batch mode ───────────────────
+    if (batch)
+    {
+        // Pool must outlive the batch CB; destroyed in vkflame_batch_end().
+        vkf_batch_defer_pool(desc_pool);
+        // cmd is the shared batch CB — do NOT end, submit, or free it here.
+        return;
+    }
 
     VKF_CHECK(vkEndCommandBuffer(cmd));
 

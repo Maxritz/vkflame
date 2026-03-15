@@ -99,7 +99,8 @@ static const uint8_t *find_spv(const char *name, uint32_t *out_len)
 
 static VkPipeline create_pipeline(VkDevice device, VkPipelineLayout layout,
                                   const uint8_t *spv, uint32_t spv_len,
-                                  VkPipelineCache cache)
+                                  VkPipelineCache cache,
+                                  uint32_t required_subgroup_size = 0)
 {
     VkShaderModuleCreateInfo sm_ci = {};
     sm_ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -109,6 +110,13 @@ static VkPipeline create_pipeline(VkDevice device, VkPipelineLayout layout,
     VkShaderModule shader;
     VKF_CHECK(vkCreateShaderModule(device, &sm_ci, nullptr, &shader));
 
+    // Optional: force a specific subgroup (wave) size.
+    // On RDNA4 the driver reports subgroupSize=64 but the actual wave is 32;
+    // kernels that use subgroup ops need this set or they silently misbehave.
+    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo req_sg{};
+    req_sg.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO;
+    req_sg.requiredSubgroupSize = required_subgroup_size;
+
     VkComputePipelineCreateInfo pipe_ci = {};
     pipe_ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
     pipe_ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -116,6 +124,12 @@ static VkPipeline create_pipeline(VkDevice device, VkPipelineLayout layout,
     pipe_ci.stage.module = shader;
     pipe_ci.stage.pName = "main";
     pipe_ci.layout = layout;
+    if (required_subgroup_size > 0)
+    {
+        // REQUIRE_FULL_SUBGROUPS ensures the HW actually uses the requested width.
+        pipe_ci.stage.flags = VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
+        pipe_ci.stage.pNext = &req_sg;
+    }
 
     VkPipeline pipeline;
     VKF_CHECK(vkCreateComputePipelines(device, cache, 1, &pipe_ci, nullptr, &pipeline));
@@ -211,8 +225,11 @@ extern "C"
                 continue;
             }
 
+            // kernels 7 (rms_norm) and 8 (softmax_online) use subgroup arithmetic;
+            // force wave32 on RDNA4 where the driver misleadingly reports subgroupSize=64.
+            uint32_t req_sg = (i == 7 || i == 8) ? 32u : 0u;
             g_pipelines[i].pipeline = create_pipeline(ctx->device, g_pipelines[i].layout,
-                                                      spv, spv_len, pipeline_cache);
+                                                      spv, spv_len, pipeline_cache, req_sg);
         }
 
         // ── Save pipeline cache ──────────────────────────────────────

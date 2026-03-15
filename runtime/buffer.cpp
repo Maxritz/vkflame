@@ -54,7 +54,65 @@ static struct StagingArena
     VkDeviceMemory memory = VK_NULL_HANDLE;
     void *mapped = nullptr;
     size_t capacity = 0;
+    bool is_coherent = true; // set at init; used to gate vkInvalidateMappedMemoryRanges
 } g_staging{};
+
+// ── Command-buffer batching ────────────────────────────────────────────────
+// Merges the three vkQueueSubmit+vkWaitForFences calls that make up a single
+// _staged() op (h2d upload + compute dispatch + d2h download) into ONE submit.
+// This reduces WDDM kernel-mode transition overhead from ~3 ms to ~1 ms per op.
+//
+// When g_batch_active == true:
+//   vkflame_memcpy_h2d  — records copy into g_batch_cb; no submit
+//   do_dispatch()       — records compute into g_batch_cb (with TRANSFER→COMPUTE barrier); no submit
+//   vkflame_memcpy_d2h  — records copy into g_batch_cb (with COMPUTE→TRANSFER barrier);
+//                         stores {cpu_dst, staging_offset, size} in g_batch_d2h_list
+// vkflame_batch_end() submits once, waits once, then memcpy's staging → cpu.
+
+static bool g_batch_active = false;
+static VkCommandBuffer g_batch_cb = VK_NULL_HANDLE;
+static VkFence g_batch_fence = VK_NULL_HANDLE;
+static size_t g_batch_stg_off = 0; // next free byte in staging for this batch
+// Barrier state: track whether a preceding stage needs a pipeline barrier.
+static bool g_batch_need_comp_barrier = false; // h2d done → TRANSFER→COMPUTE needed
+static bool g_batch_need_xfer_barrier = false; // compute done → COMPUTE→TRANSFER needed
+
+struct BatchD2H
+{
+    void *cpu_dst;
+    size_t stg_off;
+    size_t size;
+};
+static std::vector<BatchD2H> g_batch_d2h_list;
+static std::vector<VkDescriptorPool> g_batch_desc_pools; // deferred-destroy after fence
+
+// Non-extern-C helpers; visible to dispatch.cpp (same shared library).
+bool vkf_batch_active() { return g_batch_active; }
+VkCommandBuffer vkf_batch_cb() { return g_batch_cb; }
+
+// Insert TRANSFER→COMPUTE barrier if an h2d copy preceded the current dispatch.
+void vkf_batch_pre_compute_barrier()
+{
+    if (!g_batch_active || !g_batch_need_comp_barrier)
+        return;
+    VkMemoryBarrier b{};
+    b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(g_batch_cb,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 1, &b, 0, nullptr, 0, nullptr);
+    g_batch_need_comp_barrier = false;
+    g_batch_need_xfer_barrier = true; // compute follows; d2h will need COMPUTE→TRANSFER
+}
+
+// Called by do_dispatch() to hand off its temporary descriptor pool so it
+// can be destroyed after the batch fence wait rather than immediately.
+void vkf_batch_defer_pool(VkDescriptorPool pool)
+{
+    g_batch_desc_pools.push_back(pool);
+}
 
 static uint32_t find_memory_type(VkPhysicalDevice phys, uint32_t type_bits, VkMemoryPropertyFlags props)
 {
@@ -148,6 +206,9 @@ void staging_arena_init()
     vkBindBufferMemory(ctx->device, g_staging.buffer, g_staging.memory, 0);
     vkMapMemory(ctx->device, g_staging.memory, 0, VK_WHOLE_SIZE, 0, &g_staging.mapped);
     g_staging.capacity = STAGING_ARENA_BYTES;
+    // We explicitly requested HOST_COHERENT, so CPU writes are immediately visible
+    // to the GPU without vkFlushMappedMemoryRanges.
+    g_staging.is_coherent = true;
     fprintf(stderr, "[vkflame] staging arena: 256 MB permanently mapped\n");
 }
 
@@ -297,6 +358,18 @@ extern "C"
         // HOST_COHERENT memory — no explicit flush required after memcpy.
         if (g_staging.buffer != VK_NULL_HANDLE && size <= g_staging.capacity)
         {
+            // ── Batch mode: record into shared CB, no submit yet ──────────
+            if (g_batch_active && g_batch_stg_off + size <= g_staging.capacity)
+            {
+                size_t my_off = g_batch_stg_off;
+                memcpy((char *)g_staging.mapped + my_off, src, size);
+                g_batch_stg_off = align_up(my_off + size);
+                VkBufferCopy region = {(VkDeviceSize)my_off, (VkDeviceSize)offset, (VkDeviceSize)size};
+                vkCmdCopyBuffer(g_batch_cb, g_staging.buffer, dst->buffer, 1, &region);
+                g_batch_need_comp_barrier = true;
+                return 0;
+            }
+            // ── Normal single-op path ─────────────────────────────────────
             memcpy(g_staging.mapped, src, size);
 
             struct CB
@@ -372,6 +445,30 @@ extern "C"
         // ── Fast path: arena ─────────────────────────────────────────────
         if (g_staging.buffer != VK_NULL_HANDLE && size <= g_staging.capacity)
         {
+            // ── Batch mode: record copy, defer memcpy until after fence ────
+            if (g_batch_active && g_batch_stg_off + size <= g_staging.capacity)
+            {
+                // Insert COMPUTE→TRANSFER barrier if a dispatch preceded this d2h.
+                if (g_batch_need_xfer_barrier)
+                {
+                    VkMemoryBarrier b2{};
+                    b2.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                    b2.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                    b2.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                    vkCmdPipelineBarrier(g_batch_cb,
+                                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                         0, 1, &b2, 0, nullptr, 0, nullptr);
+                    g_batch_need_xfer_barrier = false;
+                }
+                size_t my_off = g_batch_stg_off;
+                VkBufferCopy region = {(VkDeviceSize)offset, (VkDeviceSize)my_off, (VkDeviceSize)size};
+                vkCmdCopyBuffer(g_batch_cb, src->buffer, g_staging.buffer, 1, &region);
+                g_batch_stg_off = align_up(my_off + size);
+                g_batch_d2h_list.push_back({dst, my_off, size});
+                return 0;
+            }
+            // ── Normal single-op path ─────────────────────────────────────
             struct CB
             {
                 VkBuffer src_buf, dst_buf;
@@ -778,5 +875,82 @@ extern "C"
     }
 
 #endif // _WIN32
+
+    // ── Command-buffer batching ──────────────────────────────────────────
+
+    void vkflame_batch_begin()
+    {
+        VKFContext *ctx = vkflame_get_context();
+        if (!ctx || g_batch_active)
+            return;
+
+        VkCommandBufferAllocateInfo ai{};
+        ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        ai.commandPool = ctx->command_pool;
+        ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        ai.commandBufferCount = 1;
+        vkAllocateCommandBuffers(ctx->device, &ai, &g_batch_cb);
+
+        VkCommandBufferBeginInfo bi{};
+        bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(g_batch_cb, &bi);
+
+        VkFenceCreateInfo fi{};
+        fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        vkCreateFence(ctx->device, &fi, nullptr, &g_batch_fence);
+
+        g_batch_active = true;
+        g_batch_stg_off = 0;
+        g_batch_need_comp_barrier = false;
+        g_batch_need_xfer_barrier = false;
+        g_batch_d2h_list.clear();
+        g_batch_desc_pools.clear();
+    }
+
+    void vkflame_batch_end()
+    {
+        if (!g_batch_active || g_batch_cb == VK_NULL_HANDLE)
+            return;
+        VKFContext *ctx = vkflame_get_context();
+        if (!ctx)
+            return;
+
+        vkEndCommandBuffer(g_batch_cb);
+
+        VkSubmitInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &g_batch_cb;
+        VKF_CHECK(vkQueueSubmit(ctx->compute_queue, 1, &si, g_batch_fence));
+        VKF_CHECK(vkWaitForFences(ctx->device, 1, &g_batch_fence, VK_TRUE, UINT64_MAX));
+
+        // HOST_COHERENT guard (staging is always coherent here, but defensive).
+        if (!g_staging.is_coherent && g_staging.memory != VK_NULL_HANDLE)
+        {
+            VkMappedMemoryRange inv{};
+            inv.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+            inv.memory = g_staging.memory;
+            inv.offset = 0;
+            inv.size = VK_WHOLE_SIZE;
+            vkInvalidateMappedMemoryRanges(ctx->device, 1, &inv);
+        }
+
+        // Flush deferred d2h copies: staging memory → CPU pointers.
+        for (const auto &d : g_batch_d2h_list)
+            memcpy(d.cpu_dst, (const char *)g_staging.mapped + d.stg_off, d.size);
+
+        // Destroy descriptor pools that were deferred by do_dispatch() in batch mode.
+        for (auto pool : g_batch_desc_pools)
+            vkDestroyDescriptorPool(ctx->device, pool, nullptr);
+
+        vkDestroyFence(ctx->device, g_batch_fence, nullptr);
+        vkFreeCommandBuffers(ctx->device, ctx->command_pool, 1, &g_batch_cb);
+        g_batch_cb = VK_NULL_HANDLE;
+        g_batch_fence = VK_NULL_HANDLE;
+        g_batch_active = false;
+        g_batch_d2h_list.clear();
+        g_batch_desc_pools.clear();
+    }
 
 } // extern "C"
