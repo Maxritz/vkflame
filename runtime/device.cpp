@@ -5,6 +5,10 @@
 #include <vector>
 #include <algorithm>
 
+// Forward declarations for internal helpers in buffer.cpp
+void staging_arena_init();
+void staging_arena_destroy();
+
 // ── VKF_CHECK macro ──────────────────────────────────────────────
 #define VKF_CHECK(call)                                         \
     do                                                          \
@@ -351,6 +355,7 @@ extern "C"
 
         g_initialized = true;
         vkflame_print_info();
+        staging_arena_init();
         vkflame_pipelines_init();
         return 0;
     }
@@ -359,6 +364,7 @@ extern "C"
     {
         if (!g_initialized)
             return;
+        staging_arena_destroy();
         vkDestroyCommandPool(g_ctx.device, g_ctx.command_pool, nullptr);
         vkDestroyDevice(g_ctx.device, nullptr);
         vkDestroyInstance(g_ctx.instance, nullptr);

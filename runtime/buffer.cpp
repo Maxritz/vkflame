@@ -39,6 +39,22 @@ static constexpr size_t ALIGN = 256;
 
 static size_t align_up(size_t n) { return (n + ALIGN - 1) & ~(ALIGN - 1); }
 
+// ── Staging arena (256 MB, permanently mapped) ────────────────────────────
+// Eliminates one vkAllocateMemory + vkFreeMemory pair per transfer call.
+// On WDDM those driver calls cost ~1–5 ms each; a transformer layer with
+// ~80 dispatches would accumulate ~400–800 ms of pure driver overhead.
+// Since every transfer function calls submit_and_wait() synchronously, the
+// arena can safely be reused from offset 0 on every new call.
+
+static constexpr size_t STAGING_ARENA_BYTES = 256ULL * 1024 * 1024; // 256 MB
+
+static struct StagingArena {
+    VkBuffer       buffer   = VK_NULL_HANDLE;
+    VkDeviceMemory memory   = VK_NULL_HANDLE;
+    void*          mapped   = nullptr;
+    size_t         capacity = 0;
+} g_staging{};
+
 static uint32_t find_memory_type(VkPhysicalDevice phys, uint32_t type_bits, VkMemoryPropertyFlags props)
 {
     VkPhysicalDeviceMemoryProperties mem_props;
@@ -87,6 +103,64 @@ static void submit_and_wait(VkDevice device, VkCommandPool pool, VkQueue queue,
     vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
     vkDestroyFence(device, fence, nullptr);
     vkFreeCommandBuffers(device, pool, 1, &cb);
+}
+
+// Called once from vkflame_init() after the Vulkan device is ready.
+void staging_arena_init()
+{
+    VKFContext *ctx = vkflame_get_context();
+    if (!ctx) return;
+
+    VkBufferCreateInfo bci{};
+    bci.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.size        = STAGING_ARENA_BYTES;
+    bci.usage       = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                      VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    if (vkCreateBuffer(ctx->device, &bci, nullptr, &g_staging.buffer) != VK_SUCCESS) {
+        fprintf(stderr, "[vkflame] staging arena: vkCreateBuffer failed — will use slow path\n");
+        return;
+    }
+
+    VkMemoryRequirements mr;
+    vkGetBufferMemoryRequirements(ctx->device, g_staging.buffer, &mr);
+
+    uint32_t mt = find_memory_type(ctx->physical_device, mr.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+    VkMemoryAllocateInfo mai{};
+    mai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    mai.allocationSize  = mr.size;
+    mai.memoryTypeIndex = mt;
+
+    if (vkAllocateMemory(ctx->device, &mai, nullptr, &g_staging.memory) != VK_SUCCESS) {
+        fprintf(stderr, "[vkflame] staging arena: vkAllocateMemory failed — will use slow path\n");
+        vkDestroyBuffer(ctx->device, g_staging.buffer, nullptr);
+        g_staging.buffer = VK_NULL_HANDLE;
+        return;
+    }
+
+    vkBindBufferMemory(ctx->device, g_staging.buffer, g_staging.memory, 0);
+    vkMapMemory(ctx->device, g_staging.memory, 0, VK_WHOLE_SIZE, 0, &g_staging.mapped);
+    g_staging.capacity = STAGING_ARENA_BYTES;
+    fprintf(stderr, "[vkflame] staging arena: 256 MB permanently mapped\n");
+}
+
+// Called from vkflame_shutdown() before device destruction.
+void staging_arena_destroy()
+{
+    VKFContext *ctx = vkflame_get_context();
+    if (!ctx || g_staging.buffer == VK_NULL_HANDLE) return;
+    if (g_staging.mapped) {
+        vkUnmapMemory(ctx->device, g_staging.memory);
+        g_staging.mapped = nullptr;
+    }
+    vkDestroyBuffer(ctx->device, g_staging.buffer, nullptr);
+    vkFreeMemory(ctx->device, g_staging.memory, nullptr);
+    g_staging.buffer   = VK_NULL_HANDLE;
+    g_staging.memory   = VK_NULL_HANDLE;
+    g_staging.capacity = 0;
 }
 
 extern "C"
@@ -204,34 +278,36 @@ extern "C"
     }
 
     // ── Staging buffer helpers ───────────────────────────────────────
-    struct CopyH2D
-    {
-        VkBuffer dst;
-        const void *src;
-        size_t size;
-        size_t offset;
-    };
-
-    static void record_h2d(VkCommandBuffer cb, void *ud)
-    {
-        auto *c = (CopyH2D *)ud;
-        VkBufferCopy region = {0, c->offset, c->size};
-        vkCmdCopyBuffer(cb, c->dst /* use staging as source via pointer swap */, c->dst, 1, &region);
-    }
 
     int vkflame_memcpy_h2d(VKFBuffer *dst, const void *src, size_t size, size_t offset)
     {
-        if (!dst || !src)
-            return -1;
+        if (!dst || !src) return -1;
         VKFContext *ctx = vkflame_get_context();
-        if (!ctx)
-            return -1;
+        if (!ctx) return -1;
 
-        // Create staging buffer
+        // ── Fast path: arena (no per-call vkAllocateMemory) ──────────────
+        // HOST_COHERENT memory — no explicit flush required after memcpy.
+        if (g_staging.buffer != VK_NULL_HANDLE && size <= g_staging.capacity)
+        {
+            memcpy(g_staging.mapped, src, size);
+
+            struct CB { VkBuffer src_buf, dst_buf; VkDeviceSize size, offset; };
+            CB cb_data = { g_staging.buffer, dst->buffer,
+                           (VkDeviceSize)size, (VkDeviceSize)offset };
+            submit_and_wait(ctx->device, ctx->command_pool, ctx->compute_queue,
+                [](VkCommandBuffer cb, void *ud) {
+                    auto *c = (CB *)ud;
+                    VkBufferCopy region = { 0, c->offset, c->size };
+                    vkCmdCopyBuffer(cb, c->src_buf, c->dst_buf, 1, &region);
+                }, &cb_data);
+            return 0;
+        }
+
+        // ── Slow path: per-call allocation (size > 256 MB) ───────────────
         VkBufferCreateInfo bci = {};
-        bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bci.size = size;
-        bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        bci.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bci.size        = size;
+        bci.usage       = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
         VkBuffer staging;
@@ -241,11 +317,11 @@ extern "C"
         vkGetBufferMemoryRequirements(ctx->device, staging, &mr);
 
         uint32_t mt = find_memory_type(ctx->physical_device, mr.memoryTypeBits,
-                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
         VkMemoryAllocateInfo mai = {};
-        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        mai.allocationSize = mr.size;
+        mai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.allocationSize  = mr.size;
         mai.memoryTypeIndex = mt;
 
         VkDeviceMemory staging_mem;
@@ -257,19 +333,14 @@ extern "C"
         memcpy(mapped, src, size);
         vkUnmapMemory(ctx->device, staging_mem);
 
-        // Copy staging → device
-        struct CB
-        {
-            VkBuffer src_buf, dst_buf;
-            VkDeviceSize size, offset;
-        };
-        CB cb_data = {staging, dst->buffer, (VkDeviceSize)size, (VkDeviceSize)offset};
-
-        submit_and_wait(ctx->device, ctx->command_pool, ctx->compute_queue, [](VkCommandBuffer cb, void *ud)
-                        {
-            auto* c = (CB*)ud;
-            VkBufferCopy region = { 0, c->offset, c->size };
-            vkCmdCopyBuffer(cb, c->src_buf, c->dst_buf, 1, &region); }, &cb_data);
+        struct CB { VkBuffer src_buf, dst_buf; VkDeviceSize size, offset; };
+        CB cb_data = { staging, dst->buffer, (VkDeviceSize)size, (VkDeviceSize)offset };
+        submit_and_wait(ctx->device, ctx->command_pool, ctx->compute_queue,
+            [](VkCommandBuffer cb, void *ud) {
+                auto *c = (CB *)ud;
+                VkBufferCopy region = { 0, c->offset, c->size };
+                vkCmdCopyBuffer(cb, c->src_buf, c->dst_buf, 1, &region);
+            }, &cb_data);
 
         vkDestroyBuffer(ctx->device, staging, nullptr);
         vkFreeMemory(ctx->device, staging_mem, nullptr);
@@ -278,16 +349,32 @@ extern "C"
 
     int vkflame_memcpy_d2h(void *dst, VKFBuffer *src, size_t size, size_t offset)
     {
-        if (!dst || !src)
-            return -1;
+        if (!dst || !src) return -1;
         VKFContext *ctx = vkflame_get_context();
-        if (!ctx)
-            return -1;
+        if (!ctx) return -1;
 
+        // ── Fast path: arena ─────────────────────────────────────────────
+        if (g_staging.buffer != VK_NULL_HANDLE && size <= g_staging.capacity)
+        {
+            struct CB { VkBuffer src_buf, dst_buf; VkDeviceSize size, offset; };
+            CB cb_data = { src->buffer, g_staging.buffer,
+                           (VkDeviceSize)size, (VkDeviceSize)offset };
+            submit_and_wait(ctx->device, ctx->command_pool, ctx->compute_queue,
+                [](VkCommandBuffer cb, void *ud) {
+                    auto *c = (CB *)ud;
+                    VkBufferCopy region = { c->offset, 0, c->size };
+                    vkCmdCopyBuffer(cb, c->src_buf, c->dst_buf, 1, &region);
+                }, &cb_data);
+            // HOST_COHERENT — data is visible to CPU after the fence wait above.
+            memcpy(dst, g_staging.mapped, size);
+            return 0;
+        }
+
+        // ── Slow path: per-call allocation ───────────────────────────────
         VkBufferCreateInfo bci = {};
-        bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bci.size = size;
-        bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bci.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bci.size        = size;
+        bci.usage       = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
         VkBuffer staging;
@@ -297,29 +384,25 @@ extern "C"
         vkGetBufferMemoryRequirements(ctx->device, staging, &mr);
 
         uint32_t mt = find_memory_type(ctx->physical_device, mr.memoryTypeBits,
-                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
         VkMemoryAllocateInfo mai = {};
-        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        mai.allocationSize = mr.size;
+        mai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.allocationSize  = mr.size;
         mai.memoryTypeIndex = mt;
 
         VkDeviceMemory staging_mem;
         VKF_CHECK(vkAllocateMemory(ctx->device, &mai, nullptr, &staging_mem));
         VKF_CHECK(vkBindBufferMemory(ctx->device, staging, staging_mem, 0));
 
-        struct CB
-        {
-            VkBuffer src_buf, dst_buf;
-            VkDeviceSize size, offset;
-        };
-        CB cb_data = {src->buffer, staging, (VkDeviceSize)size, (VkDeviceSize)offset};
-
-        submit_and_wait(ctx->device, ctx->command_pool, ctx->compute_queue, [](VkCommandBuffer cb, void *ud)
-                        {
-            auto* c = (CB*)ud;
-            VkBufferCopy region = { c->offset, 0, c->size };
-            vkCmdCopyBuffer(cb, c->src_buf, c->dst_buf, 1, &region); }, &cb_data);
+        struct CB { VkBuffer src_buf, dst_buf; VkDeviceSize size, offset; };
+        CB cb_data = { src->buffer, staging, (VkDeviceSize)size, (VkDeviceSize)offset };
+        submit_and_wait(ctx->device, ctx->command_pool, ctx->compute_queue,
+            [](VkCommandBuffer cb, void *ud) {
+                auto *c = (CB *)ud;
+                VkBufferCopy region = { c->offset, 0, c->size };
+                vkCmdCopyBuffer(cb, c->src_buf, c->dst_buf, 1, &region);
+            }, &cb_data);
 
         void *mapped;
         VKF_CHECK(vkMapMemory(ctx->device, staging_mem, 0, size, 0, &mapped));
