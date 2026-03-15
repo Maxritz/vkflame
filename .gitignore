@@ -1,0 +1,28 @@
+# Build output
+build/
+*.pdb
+*.spv
+*.obj
+*.lib
+*.exp
+*.ilk
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+.venv/
+
+# Pipeline cache
+*.bin
+
+# Ollama run logs (local testing artifacts)
+ollama_run*.txt
+ollama_stderr.txt
+ollama_stdout.txt
+
+# Debug scripts
+debug_mm.py
