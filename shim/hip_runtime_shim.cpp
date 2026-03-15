@@ -73,6 +73,48 @@ struct hipDeviceProp_t
     int isLargeBar;
 };
 
+// ── GFX arch name resolution ─────────────────────────────────────────
+// Priority:
+//  1. VKFLAME_GFX_ARCH env var (explicit override, e.g. "gfx1100")
+//  2. HSA_OVERRIDE_GFX_VERSION env var  (e.g. "11.0.0" -> "gfx1100")
+//  3. "gfx1201" fallback (RDNA4 default)
+static std::string vkf_resolve_gfx_arch()
+{
+    // 1. Explicit vkflame override
+    const char *vkf = getenv("VKFLAME_GFX_ARCH");
+    if (vkf && vkf[0]) return std::string(vkf);
+
+    // 2. HSA_OVERRIDE_GFX_VERSION: "major.minor.stepping" -> "gfxMmS"
+    const char *hsa = getenv("HSA_OVERRIDE_GFX_VERSION");
+    if (hsa && hsa[0])
+    {
+        int maj = 0, min = 0, step = 0;
+        if (sscanf(hsa, "%d.%d.%d", &maj, &min, &step) >= 2)
+        {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "gfx%d%d%d", maj, min, step);
+            return std::string(buf);
+        }
+    }
+
+    // 3. Fallback
+    return "gfx1201";
+}
+
+// Parse major/minor from a gfx arch string (e.g. "gfx1201" -> major=12, minor=1)
+static void vkf_parse_gfx_major_minor(const std::string &arch, int &major, int &minor)
+{
+    major = 12; minor = 1; // safe defaults
+    // arch format: "gfx" + digits, e.g. gfx1201 = maj 12, min 0, step 1
+    // We treat the first 1-2 digits as major (stopping when remaining <= 2 digits)
+    const char *p = arch.c_str();
+    if (p[0]=='g' && p[1]=='f' && p[2]=='x') p += 3;
+    int val = atoi(p);
+    if (val >= 1000)      { major = val / 100;  minor = (val % 100) / 10; }
+    else if (val >= 100)  { major = val / 100;  minor = val % 100; }
+    else                  { major = val;         minor = 0; }
+}
+
 // ── Global ptr→VKFBuffer* map (separate from vkflame_buf_from_ptr) ─
 // vkflame_buf_from_ptr uses VkDeviceAddress; here we keep the void* → VKFBuffer* mapping
 static std::unordered_map<void *, VKFBuffer *> g_ptr_map;
@@ -301,16 +343,14 @@ extern "C"
         prop->sharedMemPerBlock = (int)f.max_compute_shared_memory;
         prop->maxThreadsPerBlock = 1024;
         prop->multiProcessorCount = 32; // approximate
-        prop->major = 12;               // RDNA4
-        prop->minor = 1;
-
-        // Report as gfx1201 if AMD
-        if (f.vendor_id == 0x1002)
-            strncpy(prop->gcnArchName, "gfx1201", 255);
-        else
-            strncpy(prop->gcnArchName, "unknown", 255);
-
-        prop->gcnArch = 1201;
+        // Use dynamic arch resolution so other GPUs work correctly
+        std::string arch = (f.vendor_id == 0x1002) ? vkf_resolve_gfx_arch() : "unknown";
+        strncpy(prop->gcnArchName, arch.c_str(), 255);
+        int maj = 12, min = 1;
+        vkf_parse_gfx_major_minor(arch, maj, min);
+        prop->major = maj;
+        prop->minor = min;
+        prop->gcnArch = atoi(arch.c_str() + (arch.size() > 3 ? 3 : 0));
         return hipSuccess;
     }
 
@@ -336,14 +376,25 @@ extern "C"
             *value = 32;
             break;
         case hipDeviceAttributeComputeCapabilityMajor:
-            *value = 12; // RDNA4
+        {
+            int maj = 12, min = 1;
+            vkf_parse_gfx_major_minor(vkf_resolve_gfx_arch(), maj, min);
+            *value = maj;
             break;
+        }
         case hipDeviceAttributeComputeCapabilityMinor:
-            *value = 1;
+        {
+            int maj = 12, min = 1;
+            vkf_parse_gfx_major_minor(vkf_resolve_gfx_arch(), maj, min);
+            *value = min;
             break;
+        }
         case hipDeviceAttributeGcnArch:
-            *value = 1201;
+        {
+            std::string arch = vkf_resolve_gfx_arch();
+            *value = atoi(arch.c_str() + (arch.size() > 3 ? 3 : 0));
             break;
+        }
         default:
             *value = 0;
         }
@@ -407,12 +458,16 @@ extern "C"
         *reinterpret_cast<int *>(p + 304) = 65536;                          // regsPerBlock
         *reinterpret_cast<int *>(p + 308) = (int)f.subgroup_size;           // warpSize ← critical
         *reinterpret_cast<int *>(p + 320) = 1024;                           // maxThreadsPerBlock
-        *reinterpret_cast<int *>(p + 360) = 12;                             // major = 12 (RDNA4)
-        *reinterpret_cast<int *>(p + 364) = 1;                              // minor = 1
-        *reinterpret_cast<int *>(p + 388) = 32;                             // multiProcessorCount
-        // gcnArchName[256] at offset 1160: after reserved[63] + hipReserved[32]
-        if (f.vendor_id == 0x1002)
-            strncpy(reinterpret_cast<char *>(p + 1160), "gfx1201", 255);
+        {
+            int maj = 12, min = 1;
+            std::string arch = (f.vendor_id == 0x1002) ? vkf_resolve_gfx_arch() : "unknown";
+            vkf_parse_gfx_major_minor(arch, maj, min);
+            *reinterpret_cast<int *>(p + 360) = maj;                            // major
+            *reinterpret_cast<int *>(p + 364) = min;                            // minor
+            *reinterpret_cast<int *>(p + 388) = 32;                             // multiProcessorCount
+            // gcnArchName[256] at offset 1160
+            strncpy(reinterpret_cast<char *>(p + 1160), arch.c_str(), 255);
+        }
         return hipSuccess;
     }
 
