@@ -238,6 +238,12 @@ extern "C"
             has_device_extension(g_ctx.physical_device, VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
         // FP8 — extension may not be present on all drivers
         g_ctx.features.has_float8 = false; // conservative default
+#ifdef _WIN32
+        g_ctx.features.has_external_memory_win32 =
+            has_device_extension(g_ctx.physical_device, "VK_KHR_external_memory_win32");
+#else
+        g_ctx.features.has_external_memory_win32 = false;
+#endif
 
         // ── Queue families ───────────────────────────────────────────
         // Try to find a dedicated transfer queue (no compute flag)
@@ -273,6 +279,13 @@ extern "C"
         device_exts.push_back(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
         if (g_ctx.features.has_cooperative_matrix)
             device_exts.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+#ifdef _WIN32
+        if (g_ctx.features.has_external_memory_win32)
+        {
+            device_exts.push_back("VK_KHR_external_memory");
+            device_exts.push_back("VK_KHR_external_memory_win32");
+        }
+#endif
 
         // Filter to only extensions that exist
         std::vector<const char *> valid_exts;
@@ -363,12 +376,13 @@ extern "C"
         // Write to stderr, NOT stdout — callers may be subprocesses that use
         // stdout to pipe structured data (e.g. Ollama GPU discovery sends JSON
         // to parent via stdout; any stray stdout write corrupts it).
-        fprintf(stderr, "[vkflame] %s  subgroup:%u  coop_matrix:%s  fp8:%s  int_dot:%s\n",
+        fprintf(stderr, "[vkflame] %s  subgroup:%u  coop_matrix:%s  fp8:%s  int_dot:%s  ext_mem_win32:%s\n",
                 f.device_name,
                 f.subgroup_size,
                 f.has_cooperative_matrix ? "yes" : "no",
                 f.has_float8 ? "yes" : "no",
-                f.has_integer_dot_product ? "yes" : "no");
+                f.has_integer_dot_product ? "yes" : "no",
+                f.has_external_memory_win32 ? "yes" : "no");
         fflush(stderr);
     }
 

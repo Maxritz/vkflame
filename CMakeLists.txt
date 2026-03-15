@@ -56,6 +56,23 @@ target_include_directories(vkflame_rt PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/runtime"
     "${Vulkan_INCLUDE_DIRS}"
 )
+# On Windows: add ROCm HIP headers so buffer.cpp can call hipIpcGetMemHandle
+# (optional — we load the symbol at runtime via GetProcAddress, but the
+# struct definitions are still needed for compile-time checks)
+if(WIN32)
+    find_path(HIP_INCLUDE_DIR hip/hip_runtime_api.h
+        HINTS
+            "$ENV{HIP_PATH}/include"
+            "C:/Program Files/AMD/ROCm/7.1/include"
+            "C:/Program Files/AMD/ROCm/6.2/include"
+        DOC "ROCm HIP include directory"
+    )
+    if(HIP_INCLUDE_DIR)
+        # Only needed if any runtime/*.cpp actually includes hip headers directly.
+        # Currently buffer.cpp uses GetProcAddress instead, so this is informational.
+        message(STATUS "vkflame_rt: HIP headers available at ${HIP_INCLUDE_DIR}")
+    endif()
+endif()
 target_link_libraries(vkflame_rt PUBLIC ${Vulkan_LIBRARIES})
 set_target_properties(vkflame_rt PROPERTIES
     POSITION_INDEPENDENT_CODE ON

@@ -24,6 +24,12 @@ import torch
 _DEBUG = os.environ.get("VKFLAME_DEBUG") == "1"
 _WINDOWS = platform.system() == "Windows"
 
+# On Windows, torch.Tensor.is_cuda == True means ROCm/HIP memory.
+# HIP device pointers live in a different virtual address space than Vulkan
+# device addresses, so passing them directly to vkflame_dispatch_* produces
+# garbage.  Always use the staged CPU↔Vulkan upload/download path on Windows.
+_DIRECT_GPU_OK = not _WINDOWS
+
 # ── Dtypes we actively accelerate (fp16, int8, bf16).
 # fp32 always falls through so reference computations are unaffected.
 _ACCEL_DTYPES = {torch.float16, torch.int8, torch.bfloat16}
@@ -65,6 +71,11 @@ def _ensure_runtime() -> tuple[ctypes.CDLL, ctypes.c_void_p]:
         _rt.vkflame_get_context.restype = ctypes.c_void_p
         _rt.vkflame_alloc.restype = ctypes.c_void_p
         _rt.vkflame_buf_address.restype = ctypes.c_uint64
+        # Win32 zero-copy: wrap HIP ptr as Vulkan buffer via KMT handle
+        if _WINDOWS and hasattr(_rt, 'vkflame_wrap_hip_ptr'):
+            _rt.vkflame_wrap_hip_ptr.restype = ctypes.c_void_p
+            _rt.vkflame_wrap_hip_ptr.argtypes = [
+                ctypes.c_void_p, ctypes.c_size_t]
         _ctx = ctypes.c_void_p(_rt.vkflame_get_context())
     return _rt, _ctx
 
@@ -122,7 +133,8 @@ class _VulkanBuf:
 
 
 def _is_gpu(t: Optional[torch.Tensor]) -> bool:
-    return t is not None and t.is_cuda
+    # Direct path only valid on Linux where Vulkan and CUDA share the same VA.
+    return _DIRECT_GPU_OK and t is not None and t.is_cuda
 
 
 @contextmanager
@@ -134,10 +146,18 @@ def _staged(
     """
     Yield (in_args, out_arg) ready for a vkflame_dispatch_* call.
 
-    On Linux/ROCm  (CUDA tensors): passes data_ptr() directly — zero copy.
-    On Windows/CPU (CPU tensors):  uploads inputs, allocates output buffer,
-                                    downloads result on exit.
+    Priority order:
+      1. Linux/ROCm direct:     CUDA tensors → data_ptr() straight to Vulkan
+                                (HIP and Vulkan share the same VA on Linux).
+      2. Windows zero-copy:     CUDA (HIP) tensors exported via KMT handle and
+                                imported as VkBuffer — no staging memcpy.
+                                Requires VK_KHR_external_memory_win32 + ROCm 5.4+.
+                                Falls through to (3) if any wrap fails.
+      3. Staged (fallback):     CPU tensors or failed zero-copy → upload inputs,
+                                dispatch, download output.  Works everywhere,
+                                but has significant PCIe overhead on Windows.
     """
+    # ── (1) Linux direct path ──────────────────────────────────────────────
     use_direct = all(_is_gpu(t) for t in inputs if t is not None) and _is_gpu(output)
     if use_direct:
         in_args = [
@@ -147,7 +167,58 @@ def _staged(
         yield in_args, ctypes.c_void_p(output.data_ptr())
         return
 
-    # Windows staged path
+    # ── (2) Windows zero-copy via VK_KHR_external_memory_win32 ────────────
+    # IMPORTANT: hipIpcGetMemHandle on PyTorch's caching-allocator memory
+    # returns hipSuccess but a handle that triggers VK_ERROR_DEVICE_LOST
+    # (GPU reset) inside vkAllocateMemory.  Only enable when the caller has
+    # verified their allocations with VKFLAME_WIN32_ZEROCOPY=1.
+    _WIN32_ZEROCOPY = os.environ.get("VKFLAME_WIN32_ZEROCOPY") == "1"
+    if (_WIN32_ZEROCOPY
+            and _WINDOWS
+            and hasattr(rt, 'vkflame_wrap_hip_ptr')
+            and all(t is None or t.is_cuda for t in inputs)
+            and output.is_cuda):
+        wrapped_in: list[Optional[ctypes.c_void_p]] = []
+        ok = True
+        for t in inputs:
+            if t is None:
+                wrapped_in.append(None)
+            else:
+                wp = rt.vkflame_wrap_hip_ptr(
+                    ctypes.c_void_p(t.data_ptr()), ctypes.c_size_t(t.nbytes))
+                if not wp:
+                    ok = False
+                    break
+                wrapped_in.append(ctypes.c_void_p(wp))
+        if ok:
+            out_wp = rt.vkflame_wrap_hip_ptr(
+                ctypes.c_void_p(output.data_ptr()),
+                ctypes.c_size_t(output.nbytes))
+            if out_wp:
+                try:
+                    in_args = [
+                        ctypes.c_void_p(int(rt.vkflame_buf_address(w)))
+                        if w is not None else ctypes.c_void_p(0)
+                        for w in wrapped_in
+                    ]
+                    yield in_args, ctypes.c_void_p(
+                        int(rt.vkflame_buf_address(ctypes.c_void_p(out_wp))))
+                finally:
+                    for w in wrapped_in:
+                        if w is not None:
+                            rt.vkflame_free(w)
+                    rt.vkflame_free(ctypes.c_void_p(out_wp))
+                return
+        # clean up any wrappers allocated before the failure
+        for w in wrapped_in:
+            if w is not None:
+                rt.vkflame_free(w)
+        if _DEBUG:
+            import sys
+            print("[vkflame] Win32 zero-copy failed, falling to staging",
+                  file=sys.stderr)
+
+    # ── (3) Staged fallback ────────────────────────────────────────────────
     in_bufs: list[Optional[_VulkanBuf]] = []
     for t in inputs:
         if t is None:
@@ -233,15 +304,35 @@ def _sdpa_handler(
         scale = 1.0 / math.sqrt(D)
 
     # Try Vulkan flash-attention (handles GQA natively in shader)
-    rt, ctx = _ensure_runtime()
-    out = torch.empty_like(query)
-    with _staged(rt, [query, key, value], out) as (in_args, out_arg):
-        rt.vkflame_dispatch_flash_attention(
-            ctx, in_args[0], in_args[1], in_args[2], out_arg,
-            B, Hq, Hkv, Sq, Skv, D,
-            ctypes.c_float(scale), int(is_causal),
-        )
-    return out
+    try:
+        rt, ctx = _ensure_runtime()
+        out = torch.empty_like(query)
+        with _staged(rt, [query, key, value], out) as (in_args, out_arg):
+            rt.vkflame_dispatch_flash_attention(
+                ctx, in_args[0], in_args[1], in_args[2], out_arg,
+                B, Hq, Hkv, Sq, Skv, D,
+                ctypes.c_float(scale), int(is_causal),
+            )
+        return out
+    except Exception:
+        pass  # fall through to Python reference below
+
+    # Python fallback (Vulkan unavailable or GQA not supported on this config).
+    # Expand KV heads to match Q so standard batched matmul works.
+    k_use = key.repeat_interleave(Hq // Hkv, dim=-3) if (Hkv != Hq and Hq % Hkv == 0) else key
+    v_use = value.repeat_interleave(Hq // Hkv, dim=-3) if (Hkv != Hq and Hq % Hkv == 0) else value
+    # Compute attention in fp32 using ops not in handler map (bmm/amax/exp/sum → passthrough)
+    q_f = query.float()
+    k_f = k_use.float()
+    v_f = v_use.float()
+    scores = torch.matmul(q_f, k_f.transpose(-2, -1)) * scale
+    if is_causal:
+        mask = torch.ones(Sq, Skv, dtype=torch.bool, device=query.device).tril()
+        scores = scores.masked_fill(~mask, float("-inf"))
+    sf = scores - scores.amax(dim=-1, keepdim=True)
+    sf = torch.exp(sf)
+    sf = sf / sf.sum(dim=-1, keepdim=True)
+    return torch.matmul(sf, v_f).to(query.dtype)
 
 
 def _rms_norm_handler(

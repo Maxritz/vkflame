@@ -15,6 +15,7 @@ extern "C"
         bool has_float16;
         bool has_int8;
         bool has_buffer_device_address;
+        bool has_external_memory_win32; // VK_KHR_external_memory_win32 present
         uint32_t subgroup_size;
         uint32_t max_workgroup_x;
         uint32_t max_compute_shared_memory;

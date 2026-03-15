@@ -7,6 +7,15 @@
 #include <memory>
 #include <algorithm>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+// Vulkan Win32 extension structs (VkImportMemoryWin32HandleInfoKHR, etc.)
+#include <vulkan/vulkan_win32.h>
+// Note: hipIpcGetMemHandle is loaded dynamically at runtime via GetProcAddress
+// to avoid a circular link dependency (amdhip64 shim → vkflame_rt).
+#endif
+
 #define VKF_CHECK(call)                                         \
     do                                                          \
     {                                                           \
@@ -97,6 +106,7 @@ extern "C"
 
         auto *buf = new VKFBuffer{};
         buf->size = aligned;
+        buf->is_wrapped = false;
 
         VKF_CHECK(vkCreateBuffer(ctx->device, &bci, nullptr, &buf->buffer));
 
@@ -143,6 +153,9 @@ extern "C"
                 g_ptr_map.erase(buf->address);
             }
             vkDestroyBuffer(ctx->device, buf->buffer, nullptr);
+            // For wrapped (imported) buffers vkFreeMemory only releases the
+            // Vulkan reference — the underlying HIP allocation is NOT freed.
+            // For owned buffers it frees device memory normally.
             vkFreeMemory(ctx->device, buf->memory, nullptr);
         }
         delete buf;
@@ -336,5 +349,151 @@ extern "C"
             vkCmdFillBuffer(cb, c->buf, 0, c->size, c->val); }, &cb_data);
         return 0;
     }
+
+#ifdef _WIN32
+    // ── Win32 zero-copy: wrap a HIP device pointer in a VkBuffer ──────────
+    //
+    // Flow:
+    //   1. hipIpcGetMemHandle(hip_ptr) → 64-byte opaque blob.
+    //      On AMD ROCm/Windows (WDDM), the first sizeof(HANDLE) bytes
+    //      encode the Win32 KMT (Kernel-Mode Thunk) handle for the
+    //      underlying D3D/KMD allocation.
+    //   2. VkImportMemoryWin32HandleInfoKHR  pNext'd into vkAllocateMemory
+    //      imports that KMT handle — same physical pages, zero staging.
+    //   3. VkBuffer bound to the imported VkDeviceMemory.
+    //   4. vkGetBufferDeviceAddress → usable as dispatch argument.
+    //
+    // Returns NULL if the extension is absent or the handle export fails
+    // (e.g. PyTorch sub-allocates inside a larger pool allocation).
+    // Callers must fall back to the staging path on NULL.
+    //
+    // Freeing a wrapped buffer (is_wrapped == true):
+    //   vkDestroyBuffer + vkFreeMemory release only the Vulkan-side
+    //   reference.  The underlying HIP allocation is *not* freed.
+
+    VKFBuffer *vkflame_wrap_hip_ptr(void *hip_ptr, size_t size)
+    {
+        VKFContext *ctx = vkflame_get_context();
+        if (!ctx || !ctx->features.has_external_memory_win32)
+            return nullptr;
+
+        // ── Step 1: export HIP allocation as Win32 KMT handle ──────────
+        // Load hipIpcGetMemHandle at runtime to avoid a circular link
+        // dependency (amdhip64.dll shim already links against vkflame_rt).
+        using PFN_hipIpcGetMemHandle = int (*)(void *, void *);
+        static PFN_hipIpcGetMemHandle pfn_hipIpcGetMemHandle = nullptr;
+        if (!pfn_hipIpcGetMemHandle)
+        {
+            HMODULE hip_dll = LoadLibraryA("amdhip64.dll");
+            if (!hip_dll)
+                hip_dll = LoadLibraryA("amdhip64_7.dll");
+            if (hip_dll)
+                pfn_hipIpcGetMemHandle =
+                    (PFN_hipIpcGetMemHandle)GetProcAddress(hip_dll, "hipIpcGetMemHandle");
+        }
+        if (!pfn_hipIpcGetMemHandle)
+            return nullptr;
+
+        // hipIpcMemHandle_t is a 64-byte opaque blob; use a plain char array
+        // so we don't need the HIP struct definition for the IPC part.
+        char ipc_blob[64] = {};
+        int hip_err = pfn_hipIpcGetMemHandle(ipc_blob, hip_ptr);
+        if (hip_err != 0 /* hipSuccess */)
+        {
+            // Not every allocation is IPC-exportable (e.g. PyTorch caching
+            // allocator sub-allocations).  Fail silently; caller stages.
+            return nullptr;
+        }
+        // On AMD ROCm/Windows (WDDM), the first sizeof(HANDLE) bytes of the
+        // IPC blob contain the Win32 KMT handle for the underlying allocation.
+        HANDLE kmt_handle = 0;
+        memcpy(&kmt_handle, ipc_blob, sizeof(HANDLE));
+        if (!kmt_handle)
+            return nullptr;
+
+        // ── Step 2: create VkBuffer backed by external Win32 memory ────
+        VkExternalMemoryBufferCreateInfo ext_buf_info = {};
+        ext_buf_info.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO;
+        ext_buf_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT;
+
+        VkBufferCreateInfo bci = {};
+        bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bci.pNext = &ext_buf_info;
+        bci.size = size ? size : 1;
+        bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                    VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                    VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        auto *buf = new VKFBuffer{};
+        buf->size = size;
+        buf->is_wrapped = true;
+
+        if (vkCreateBuffer(ctx->device, &bci, nullptr, &buf->buffer) != VK_SUCCESS)
+        {
+            delete buf;
+            return nullptr;
+        }
+
+        VkMemoryRequirements mem_req;
+        vkGetBufferMemoryRequirements(ctx->device, buf->buffer, &mem_req);
+
+        // ── Step 3: import the KMT handle into Vulkan device memory ────
+        VkImportMemoryWin32HandleInfoKHR import_info = {};
+        import_info.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR;
+        import_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT;
+        import_info.handle = kmt_handle;
+
+        // Need DEVICE_ADDRESS_BIT on the allocation to use vkGetBufferDeviceAddress.
+        VkMemoryAllocateFlagsInfo flags_info = {};
+        flags_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+        flags_info.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+        flags_info.pNext = &import_info;
+
+        uint32_t mem_type = find_memory_type(ctx->physical_device,
+                                             mem_req.memoryTypeBits,
+                                             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (mem_type == UINT32_MAX)
+        {
+            vkDestroyBuffer(ctx->device, buf->buffer, nullptr);
+            delete buf;
+            return nullptr;
+        }
+
+        VkMemoryAllocateInfo mai = {};
+        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.pNext = &flags_info;
+        mai.allocationSize = mem_req.size;
+        mai.memoryTypeIndex = mem_type;
+
+        if (vkAllocateMemory(ctx->device, &mai, nullptr, &buf->memory) != VK_SUCCESS)
+        {
+            vkDestroyBuffer(ctx->device, buf->buffer, nullptr);
+            delete buf;
+            return nullptr;
+        }
+
+        if (vkBindBufferMemory(ctx->device, buf->buffer, buf->memory, 0) != VK_SUCCESS)
+        {
+            vkFreeMemory(ctx->device, buf->memory, nullptr);
+            vkDestroyBuffer(ctx->device, buf->buffer, nullptr);
+            delete buf;
+            return nullptr;
+        }
+
+        // ── Step 4: device address for pass-through to dispatch ─────────
+        VkBufferDeviceAddressInfo addr_info = {};
+        addr_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+        addr_info.buffer = buf->buffer;
+        buf->address = vkGetBufferDeviceAddress(ctx->device, &addr_info);
+
+        {
+            std::lock_guard<std::mutex> lock(g_ptr_map_mutex);
+            g_ptr_map[buf->address] = buf;
+        }
+        return buf;
+    }
+#endif // _WIN32
 
 } // extern "C"
