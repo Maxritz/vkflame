@@ -18,6 +18,7 @@
 #define VKF_DEQUANT_Q4_K 4
 #define VKF_DEQUANT_Q5_K 5
 #define VKF_DEQUANT_Q6_K 6
+#define VKF_DEQUANT_Q8_1 7 // ggml Q8_1 activation format (mul_mat_q*_q8_1)
 
 // Element-wise unary op codes — passed to vkflame_dispatch_elementwise_f32
 #define VKF_EW_SILU 0

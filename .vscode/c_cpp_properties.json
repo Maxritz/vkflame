@@ -1,0 +1,36 @@
+{
+  "version": 4,
+  "configurations": [
+
+    {
+      "name": "Windows (clang-cl)",
+      "compileCommands": "${workspaceFolder}/build/compile_commands.json",
+      "compilerPath": "C:/Program Files/LLVM/bin/clang++.exe",
+      "cppStandard": "c++17",
+      "intelliSenseMode": "windows-clang-x64",
+      "includePath": [
+        "${workspaceFolder}/runtime",
+        "${workspaceFolder}/shim",
+        "${env:VULKAN_SDK}/Include",
+        "${env:HIP_PATH}/include",
+        "${default}"
+      ],
+      "defines": [
+        "_WIN32",
+        "VK_USE_PLATFORM_WIN32_KHR",
+        "NOMINMAX",
+        "WIN32_LEAN_AND_MEAN"
+      ],
+      "browse": {
+        "path": [
+          "${workspaceFolder}/runtime",
+          "${workspaceFolder}/shim",
+          "${env:VULKAN_SDK}/Include",
+          "${env:HIP_PATH}/include"
+        ],
+        "limitSymbolsToIncludedHeaders": true
+      }
+    }
+
+  ]
+}

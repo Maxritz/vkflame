@@ -134,7 +134,7 @@ extern "C"
         app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
         app_info.pApplicationName = "vkflame";
         app_info.applicationVersion = VK_MAKE_VERSION(0, 1, 0);
-        app_info.apiVersion = VK_API_VERSION_1_4;
+        app_info.apiVersion = VK_API_VERSION_1_3; // 1.3 required; 1.4 breaks pre-release drivers
 
         std::vector<const char *> instance_layers;
         std::vector<const char *> instance_exts;
@@ -360,13 +360,16 @@ extern "C"
     void vkflame_print_info()
     {
         const auto &f = g_ctx.features;
-        fprintf(stdout, "[vkflame] %s  subgroup:%u  coop_matrix:%s  fp8:%s  int_dot:%s\n",
+        // Write to stderr, NOT stdout — callers may be subprocesses that use
+        // stdout to pipe structured data (e.g. Ollama GPU discovery sends JSON
+        // to parent via stdout; any stray stdout write corrupts it).
+        fprintf(stderr, "[vkflame] %s  subgroup:%u  coop_matrix:%s  fp8:%s  int_dot:%s\n",
                 f.device_name,
                 f.subgroup_size,
                 f.has_cooperative_matrix ? "yes" : "no",
                 f.has_float8 ? "yes" : "no",
                 f.has_integer_dot_product ? "yes" : "no");
-        fflush(stdout);
+        fflush(stderr);
     }
 
 } // extern "C"

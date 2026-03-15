@@ -24,5 +24,13 @@ ollama_run*.txt
 ollama_stderr.txt
 ollama_stdout.txt
 
-# Debug scripts
+# Debug / session scratch scripts
 debug_mm.py
+check_imports.ps1
+tools/check_imports.py
+tools/run_inference.py
+tools/test_hip_vulkan.py
+tools/test_rocm_to_vulkan.py
+
+# Release archives (built locally or CI-produced)
+*.zip

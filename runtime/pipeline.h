@@ -39,7 +39,8 @@ extern "C"
         VKF_KERNEL_SCALE_F32 = 25,       // y = scale*x + bias
         VKF_KERNEL_BINOP_F32 = 26,       // add/mul/sub/div
         VKF_KERNEL_RMS_NORM_F32 = 27,    // fp32 rms norm (no gamma)
-        VKF_KERNEL_COUNT = 28
+        VKF_KERNEL_DEQUANT_Q8_1 = 28,    // Q8_1 activations used in mul_mat_q*_q8_1
+        VKF_KERNEL_COUNT = 29
     };
 
     struct VKFPipeline

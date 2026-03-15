@@ -433,8 +433,8 @@ extern "C"
             VKF_KERNEL_DEQUANT_Q4_0, VKF_KERNEL_DEQUANT_Q4_1,
             VKF_KERNEL_DEQUANT_Q8_0, VKF_KERNEL_DEQUANT_Q5_0,
             VKF_KERNEL_DEQUANT_Q4_K, VKF_KERNEL_DEQUANT_Q5_K,
-            VKF_KERNEL_DEQUANT_Q6_K};
-        if (quant_type < 0 || quant_type > 6)
+            VKF_KERNEL_DEQUANT_Q6_K, VKF_KERNEL_DEQUANT_Q8_1};
+        if (quant_type < 0 || quant_type > 7)
             return;
 
         struct DequantPC

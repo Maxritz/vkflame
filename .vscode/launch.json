@@ -1,0 +1,160 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+
+    {
+      "name": "Python: run all tests",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["tests/", "-v", "--tb=long"],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/python",
+        "VKFLAME_DEBUG": "1"
+      },
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    {
+      "name": "Python: test correctness",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["tests/test_correctness.py", "-v", "--tb=long", "-s"],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/python",
+        "VKFLAME_DEBUG": "1"
+      },
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    {
+      "name": "Python: test with validation layer",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["tests/test_correctness.py", "-v", "--tb=long", "-s"],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/python",
+        "VKFLAME_DEBUG": "1",
+        "VK_INSTANCE_LAYERS": "VK_LAYER_KHRONOS_validation",
+        "VK_LOADER_DEBUG": "error"
+      },
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+
+    {
+      "name": "Python: vkflame info",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tools/vkflame_info.py",
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/python",
+        "VKFLAME_DEBUG": "1"
+      },
+      "console": "integratedTerminal"
+    },
+
+    {
+      "name": "Python: quantise model",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "vkflame.tools.quantise",
+      "args": ["${input:model_path}", "${input:output_path}"],
+      "cwd": "${workspaceFolder}",
+      "env": { "PYTHONPATH": "${workspaceFolder}/python" },
+      "console": "integratedTerminal"
+    },
+
+    {
+      "name": "Python: benchmark",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tools/benchmark.py",
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/python",
+        "VKFLAME_DEBUG": "1"
+      },
+      "console": "integratedTerminal"
+    },
+
+    {
+      "name": "C++: debug runtime tests",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build-debug/vkflame_tests.exe",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}/build-debug",
+      "environment": [
+        { "name": "VKFLAME_DEBUG",       "value": "1" },
+        { "name": "VK_INSTANCE_LAYERS",  "value": "VK_LAYER_KHRONOS_validation" },
+        { "name": "VK_LOADER_DEBUG",     "value": "error" }
+      ],
+      "console": "integratedTerminal",
+      "preLaunchTask": "build: debug"
+    },
+
+    {
+      "name": "C++: debug device init",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build-debug/test_device.exe",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}/build-debug",
+      "environment": [
+        { "name": "VKFLAME_DEBUG",      "value": "1" },
+        { "name": "VK_INSTANCE_LAYERS", "value": "VK_LAYER_KHRONOS_validation" },
+        { "name": "VK_LOADER_DEBUG",    "value": "error" }
+      ],
+      "console": "integratedTerminal",
+      "preLaunchTask": "build: debug"
+    },
+
+    {
+      "name": "C++: debug shim",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build-debug/test_shim.exe",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}/build-debug",
+      "environment": [
+        { "name": "VKFLAME_DEBUG", "value": "1" },
+        { "name": "VK_INSTANCE_LAYERS", "value": "VK_LAYER_KHRONOS_validation" },
+        {
+          "name": "PATH",
+          "value": "${workspaceFolder}/build-debug;${env:PATH}"
+        }
+      ],
+      "console": "integratedTerminal",
+      "preLaunchTask": "build: debug"
+    }
+
+  ],
+
+  "inputs": [
+    {
+      "id": "model_path",
+      "type": "promptString",
+      "description": "Path to model directory",
+      "default": "C:/models/llama3-8b"
+    },
+    {
+      "id": "output_path",
+      "type": "promptString",
+      "description": "Output path for quantised model",
+      "default": "C:/models/llama3-8b-int8"
+    }
+  ]
+
+}

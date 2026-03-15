@@ -68,6 +68,7 @@ static const KernelConfig k_configs[VKF_KERNEL_COUNT] = {
     {"scale_f32", 12, 2},      // 25: src,dst + {n,scale,bias}
     {"binop_f32", 16, 3},      // 26: src0,src1,dst + {n,op,src1_n,pad}
     {"rms_norm_f32", 12, 2},   // 27: src,dst + {M,N,eps}
+    {"dequant_q8_1", 4, 2},    // 28: src(Q8_1 packed), dst(float)
 };
 
 static VKFPipeline g_pipelines[VKF_KERNEL_COUNT] = {};

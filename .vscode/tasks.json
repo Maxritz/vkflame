@@ -1,0 +1,381 @@
+{
+  "version": "2.0.0",
+
+  "options": {
+    "shell": {
+      "executable": "powershell.exe",
+      "args": ["-NoProfile", "-NonInteractive", "-Command"]
+    }
+  },
+
+  "tasks": [
+
+    {
+      "label": "cmake: configure release",
+      "type": "shell",
+      "command": "cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON; if ($LASTEXITCODE -eq 0) { Write-Host '[OK] configured release' } else { Write-Host '[FAIL] cmake configure failed' }",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "cmake: configure debug",
+      "type": "shell",
+      "command": "cmake -B build-debug -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON; if ($LASTEXITCODE -eq 0) { Write-Host '[OK] configured debug' }",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "build: all",
+      "type": "shell",
+      "command": "cmake --build build -j; if ($LASTEXITCODE -eq 0) { Write-Host '[OK] build complete' } else { Write-Host '[FAIL] build failed' }",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+      "problemMatcher": {
+        "owner": "cpp",
+        "fileLocation": ["relative", "${workspaceFolder}"],
+        "pattern": {
+          "regexp": "^(.*)\\((\\d+),(\\d+)\\):\\s+(warning|error)\\s+\\w+:\\s+(.*)$",
+          "file": 1, "line": 2, "column": 3, "severity": 4, "message": 5
+        }
+      }
+    },
+
+    {
+      "label": "build: debug",
+      "type": "shell",
+      "command": "cmake --build build-debug -j; if ($LASTEXITCODE -eq 0) { Write-Host '[OK] debug build complete' }",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "build: runtime only",
+      "type": "shell",
+      "command": "cmake --build build --target vkflame_rt -j",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "build: shims only",
+      "type": "shell",
+      "command": "cmake --build build --target hipblaslt hipblas amdhip64 -j",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "shaders: compile all",
+      "type": "shell",
+      "command": "cmake --build build --target spirv_kernels -j",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+      "problemMatcher": {
+        "owner": "glsl",
+        "fileLocation": "absolute",
+        "pattern": {
+          "regexp": "^(.*\\.glsl):(\\d+):\\s+(error|warning):\\s+(.*)$",
+          "file": 1, "line": 2, "severity": 3, "message": 4
+        }
+      }
+    },
+
+    {
+      "label": "shaders: compile this file",
+      "type": "shell",
+      "command": "glslc --target-env=vulkan1.3 -O -fshader-stage=compute '${file}' -o '${fileDirname}/${fileBasenameNoExtension}.spv'; if ($LASTEXITCODE -eq 0) { Write-Host '[OK] ${fileBasename}' } else { Write-Host '[FAIL] ${fileBasename}' }",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": {
+        "owner": "glsl",
+        "fileLocation": "absolute",
+        "pattern": {
+          "regexp": "^(.*\\.glsl):(\\d+):\\s+(error|warning):\\s+(.*)$",
+          "file": 1, "line": 2, "severity": 3, "message": 4
+        }
+      }
+    },
+
+    {
+      "label": "shaders: validate this file",
+      "type": "shell",
+      "command": "spirv-val '${fileDirname}/${fileBasenameNoExtension}.spv'; if ($LASTEXITCODE -eq 0) { Write-Host '[VALID]' } else { Write-Host '[INVALID]' }",
+      "options": { "cwd": "${workspaceFolder}" },
+      "dependsOn": "shaders: compile this file",
+      "group": { "kind": "test", "isDefault": false },
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "shaders: disassemble this file",
+      "type": "shell",
+      "command": "spirv-dis '${fileDirname}/${fileBasenameNoExtension}.spv'",
+      "options": { "cwd": "${workspaceFolder}" },
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "shaders: dump ISA (AMD gfx1201)",
+      "type": "shell",
+      "command": "New-Item -ItemType Directory -Force -Path build/isa | Out-Null; & \"$env:HIP_PATH\\bin\\rga.exe\" -s vk-spv-offline -c gfx1201 --isa 'build/isa/${fileBasenameNoExtension}.isa' 'build/spirv/${fileBasenameNoExtension}.spv'; if ($LASTEXITCODE -eq 0) { Get-Content 'build/isa/${fileBasenameNoExtension}.isa' }",
+      "options": { "cwd": "${workspaceFolder}" },
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "embed spirv",
+      "type": "shell",
+      "command": "python tools/embed_spirv.py build/spirv build/spirv_embed.cpp; if ($LASTEXITCODE -eq 0) { Write-Host '[OK] spirv_embed.cpp written' }",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "test: all",
+      "type": "shell",
+      "command": "python -m pytest tests/ -v --tb=short",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": { "PYTHONPATH": "${workspaceFolder}/python" }
+      },
+      "group": { "kind": "test", "isDefault": true },
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "test: correctness only",
+      "type": "shell",
+      "command": "python -m pytest tests/test_correctness.py -v --tb=long",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": { "PYTHONPATH": "${workspaceFolder}/python" }
+      },
+      "group": { "kind": "test", "isDefault": false },
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "test: single test",
+      "type": "shell",
+      "command": "python -m pytest tests/ -v -k '${input:test_name}' --tb=long",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": { "PYTHONPATH": "${workspaceFolder}/python" }
+      },
+      "group": { "kind": "test", "isDefault": false },
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "test: with validation layer",
+      "type": "shell",
+      "command": "python -m pytest tests/test_correctness.py -v --tb=long -s",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}/python",
+          "VK_INSTANCE_LAYERS": "VK_LAYER_KHRONOS_validation",
+          "VK_LOADER_DEBUG": "error",
+          "VKFLAME_DEBUG": "1"
+        }
+      },
+      "group": { "kind": "test", "isDefault": false },
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "python: install editable",
+      "type": "shell",
+      "command": "pip install -e python/; if ($LASTEXITCODE -eq 0) { Write-Host '[OK] installed' }",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "python: install shims (PATH registry)",
+      "type": "shell",
+      "command": "python -m vkflame.install; if ($LASTEXITCODE -eq 0) { Write-Host '[OK] open a new terminal for PATH to take effect' }",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": { "PYTHONPATH": "${workspaceFolder}/python" }
+      },
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "python: uninstall shims",
+      "type": "shell",
+      "command": "python -m vkflame.install --undo",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": { "PYTHONPATH": "${workspaceFolder}/python" }
+      },
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "quantise: model",
+      "type": "shell",
+      "command": "python -m vkflame.tools.quantise '${input:model_path}' '${input:output_path}'",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": { "PYTHONPATH": "${workspaceFolder}/python" }
+      },
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "benchmark: ops",
+      "type": "shell",
+      "command": "python tools/benchmark.py",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}/python",
+          "VKFLAME_DEBUG": "1"
+        }
+      },
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "info: vulkan device",
+      "type": "shell",
+      "command": "vulkaninfo --summary",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "info: vkflame device",
+      "type": "shell",
+      "command": "python -c 'import vkflame; vkflame.info()'",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": { "PYTHONPATH": "${workspaceFolder}/python" }
+      },
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "info: check DLL exports",
+      "type": "shell",
+      "command": "Write-Host '--- vkflame_rt.dll ---'; dumpbin /EXPORTS build/vkflame_rt.dll | Select-String 'vkflame_'; Write-Host '--- amdhip64.dll ---'; dumpbin /EXPORTS build/amdhip64.dll | Select-String 'hip'; Write-Host '--- hipblas.dll ---'; dumpbin /EXPORTS build/hipblas.dll | Select-String 'hipblas'; Write-Host '--- hipblaslt.dll ---'; dumpbin /EXPORTS build/hipblaslt.dll | Select-String 'hipblasLt'",
+      "options": { "cwd": "${workspaceFolder}" },
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "info: check PATH order",
+      "type": "shell",
+      "command": "$env:PATH -split ';' | Where-Object { $_ -match 'vkflame|HIP|hip|rocm' } | Select-Object -First 10",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "debug: run with validation layer",
+      "type": "shell",
+      "command": "$env:VK_INSTANCE_LAYERS='VK_LAYER_KHRONOS_validation'; $env:VK_LOADER_DEBUG='error'; $env:PYTHONPATH='python'; $env:VKFLAME_DEBUG='1'; python -c \"import vkflame; vkflame.info()\"",
+      "options": { "cwd": "${workspaceFolder}" },
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "clean: build",
+      "type": "shell",
+      "command": "cmake -E remove_directory build; cmake -E remove_directory build-debug; Write-Host '[OK] cleaned'",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "clean: pipeline cache",
+      "type": "shell",
+      "command": "Remove-Item -Path \"$env:LOCALAPPDATA\\vkflame\\pipeline_cache.bin\" -ErrorAction SilentlyContinue; Write-Host '[OK] pipeline cache cleared'",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "clean: all",
+      "type": "shell",
+      "command": "cmake -E remove_directory build; cmake -E remove_directory build-debug; cmake -E remove_directory dist; Get-ChildItem -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue; Get-ChildItem -Recurse -Directory -Filter '*.egg-info' | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -Path \"$env:LOCALAPPDATA\\vkflame\\pipeline_cache.bin\" -ErrorAction SilentlyContinue; Write-Host '[OK] cleaned'",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "full: clean configure build test",
+      "type": "shell",
+      "command": "cmake -E remove_directory build; cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON; cmake --build build -j; python -m pytest tests/ -v --tb=short",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": { "PYTHONPATH": "${workspaceFolder}/python" }
+      },
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+      "problemMatcher": []
+    }
+
+  ],
+
+  "inputs": [
+    {
+      "id": "test_name",
+      "type": "promptString",
+      "description": "Test name or keyword (e.g. test_mm_f16 or softmax)",
+      "default": "test_mm_f16"
+    },
+    {
+      "id": "model_path",
+      "type": "promptString",
+      "description": "Path to HuggingFace model directory",
+      "default": "C:/models/llama3-8b"
+    },
+    {
+      "id": "output_path",
+      "type": "promptString",
+      "description": "Output path for quantised model",
+      "default": "C:/models/llama3-8b-int8"
+    }
+  ]
+
+}

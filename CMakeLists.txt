@@ -82,7 +82,7 @@ target_include_directories(hipblas PRIVATE
 target_link_libraries(hipblas PRIVATE vkflame_rt)
 
 add_library(amdhip64 SHARED "${CMAKE_CURRENT_SOURCE_DIR}/shim/hip_runtime_shim.cpp")
-# On Windows, Ollama expects the file to be named amdhip64_6.dll (matches ROCm naming)
+# On Windows, Ollama expects the file to be named amdhip64_6.dll (matches ROCm 6.x naming)
 set_target_properties(amdhip64 PROPERTIES SOVERSION 6 OUTPUT_NAME "amdhip64_6" WINDOWS_EXPORT_ALL_SYMBOLS ON)
 target_include_directories(amdhip64 PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/runtime"
@@ -90,6 +90,16 @@ target_include_directories(amdhip64 PRIVATE
     "${Vulkan_INCLUDE_DIRS}"
 )
 target_link_libraries(amdhip64 PRIVATE vkflame_rt)
+
+# ── ROCm 7.x shim — ComfyUI/PyTorch 2.9+ AMD bundle uses amdhip64_7.dll ────
+add_library(amdhip64_7 SHARED "${CMAKE_CURRENT_SOURCE_DIR}/shim/hip_runtime_shim.cpp")
+set_target_properties(amdhip64_7 PROPERTIES OUTPUT_NAME "amdhip64_7" WINDOWS_EXPORT_ALL_SYMBOLS ON)
+target_include_directories(amdhip64_7 PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/runtime"
+    "${CMAKE_CURRENT_SOURCE_DIR}/shim"
+    "${Vulkan_INCLUDE_DIRS}"
+)
+target_link_libraries(amdhip64_7 PRIVATE vkflame_rt)
 
 # ── rocBLAS stub — ggml-hip.dll imports exactly one symbol: rocblas_initialize
 add_library(rocblas SHARED "${CMAKE_CURRENT_SOURCE_DIR}/shim/rocblas_shim.cpp")
@@ -116,4 +126,4 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_shim.cpp")
 endif()
 
 # ── Install ──────────────────────────────────────────────────────
-install(TARGETS vkflame_rt hipblaslt hipblas amdhip64 rocblas DESTINATION lib)
+install(TARGETS vkflame_rt hipblaslt hipblas amdhip64 amdhip64_7 rocblas DESTINATION lib)
