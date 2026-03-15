@@ -211,6 +211,16 @@ static VkBuffer resolve_buf(const void *ptr)
     return b ? b->buffer : VK_NULL_HANDLE;
 }
 
+// Returns the byte offset within the VKFBuffer for sub-allocation pointers.
+// Must be called AFTER resolve_buf(ptr) since that sets current_offset.
+static VkDeviceSize resolve_offset(const void *ptr)
+{
+    if (!ptr)
+        return 0;
+    VKFBuffer *b = vkflame_buf_from_ptr(const_cast<void *>(ptr));
+    return b ? (VkDeviceSize)b->current_offset : 0;
+}
+
 // ── Public dispatch API ───────────────────────────────────────────
 
 extern "C"
@@ -257,6 +267,8 @@ extern "C"
         args.kernel_id = kid;
         args.buffers = {resolve_buf(A), resolve_buf(B_mat),
                         resolve_buf(C ? C : D), resolve_buf(D)};
+        args.offsets = {resolve_offset(A), resolve_offset(B_mat),
+                        resolve_offset(C ? C : D), resolve_offset(D)};
 
         if (kid == VKF_KERNEL_LINEAR_INT8)
         {
@@ -269,6 +281,7 @@ extern "C"
             args.pc_size = sizeof(pc_i8);
             // Add scale buffer (binding 4) — re-use D buffer if no separate scale
             args.buffers.push_back(resolve_buf(D)); // placeholder for w_scale
+            args.offsets.push_back(resolve_offset(D));
         }
         else
         {
@@ -312,6 +325,8 @@ extern "C"
         args.pc_size = sizeof(pc);
         args.buffers = {resolve_buf(Q), resolve_buf(K_ptr),
                         resolve_buf(V_ptr), resolve_buf(O_ptr)};
+        args.offsets = {resolve_offset(Q), resolve_offset(K_ptr),
+                        resolve_offset(V_ptr), resolve_offset(O_ptr)};
         // One workgroup per query position per head per batch
         args.gx = (uint32_t)Sq;
         args.gy = (uint32_t)Hq;
@@ -337,6 +352,7 @@ extern "C"
         args.push_constants = &pc;
         args.pc_size = sizeof(pc);
         args.buffers = {resolve_buf(X), resolve_buf(gamma), resolve_buf(Y)};
+        args.offsets = {resolve_offset(X), resolve_offset(gamma), resolve_offset(Y)};
         // One workgroup per row
         args.gx = (uint32_t)M;
         args.gy = 1;
@@ -361,6 +377,7 @@ extern "C"
         args.push_constants = &pc;
         args.pc_size = sizeof(pc);
         args.buffers = {resolve_buf(X), resolve_buf(Y)};
+        args.offsets = {resolve_offset(X), resolve_offset(Y)};
         // One workgroup per row
         args.gx = (uint32_t)M;
         args.gy = 1;
@@ -387,6 +404,7 @@ extern "C"
         args.push_constants = &pc;
         args.pc_size = sizeof(pc);
         args.buffers = {resolve_buf(X), resolve_buf(values), resolve_buf(indices)};
+        args.offsets = {resolve_offset(X), resolve_offset(values), resolve_offset(indices)};
         // One workgroup per row
         args.gx = (uint32_t)M;
         args.gy = 1;
@@ -412,6 +430,7 @@ extern "C"
         args.push_constants = &pc;
         args.pc_size = sizeof(pc);
         args.buffers = {resolve_buf(weight), resolve_buf(indices), resolve_buf(out)};
+        args.offsets = {resolve_offset(weight), resolve_offset(indices), resolve_offset(out)};
         // One thread per output element; workgroup 256
         uint32_t total = (uint32_t)Batch * (uint32_t)D;
         args.gx = (total + 255u) / 256u;

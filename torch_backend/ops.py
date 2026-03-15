@@ -71,11 +71,15 @@ def _ensure_runtime() -> tuple[ctypes.CDLL, ctypes.c_void_p]:
         _rt.vkflame_get_context.restype = ctypes.c_void_p
         _rt.vkflame_alloc.restype = ctypes.c_void_p
         _rt.vkflame_buf_address.restype = ctypes.c_uint64
-        # Win32 zero-copy: wrap HIP ptr as Vulkan buffer via KMT handle
-        if _WINDOWS and hasattr(_rt, 'vkflame_wrap_hip_ptr'):
-            _rt.vkflame_wrap_hip_ptr.restype = ctypes.c_void_p
-            _rt.vkflame_wrap_hip_ptr.argtypes = [
-                ctypes.c_void_p, ctypes.c_size_t]
+        # Win32 zero-copy helpers
+        if _WINDOWS:
+            if hasattr(_rt, 'vkflame_wrap_hip_ptr'):
+                _rt.vkflame_wrap_hip_ptr.restype = ctypes.c_void_p
+                _rt.vkflame_wrap_hip_ptr.argtypes = [
+                    ctypes.c_void_p, ctypes.c_size_t]
+            if hasattr(_rt, 'vkflame_buf_from_hip_ptr'):
+                _rt.vkflame_buf_from_hip_ptr.restype = ctypes.c_uint64
+                _rt.vkflame_buf_from_hip_ptr.argtypes = [ctypes.c_uint64]
         _ctx = ctypes.c_void_p(_rt.vkflame_get_context())
     return _rt, _ctx
 
@@ -120,8 +124,17 @@ class _VulkanBuf:
             self._buf_ptr, ctypes.c_void_p(cont.data_ptr()), self._nbytes, 0)
 
     def download_into(self, t: torch.Tensor) -> None:
-        self._rt.vkflame_memcpy_d2h(
-            ctypes.c_void_p(t.data_ptr()), self._buf_ptr, self._nbytes, 0)
+        if t.is_cuda:
+            # On Windows, t.data_ptr() is a HIP GPU virtual address — not
+            # CPU-accessible. Download to a pinned CPU buffer first, then
+            # copy to the GPU tensor via HIP.
+            cpu = torch.empty(t.numel(), dtype=t.dtype, device='cpu')
+            self._rt.vkflame_memcpy_d2h(
+                ctypes.c_void_p(cpu.data_ptr()), self._buf_ptr, self._nbytes, 0)
+            t.copy_(cpu.view_as(t))
+        else:
+            self._rt.vkflame_memcpy_d2h(
+                ctypes.c_void_p(t.data_ptr()), self._buf_ptr, self._nbytes, 0)
 
     def free(self) -> None:
         if self._buf_ptr and self._buf_ptr.value:
@@ -133,8 +146,23 @@ class _VulkanBuf:
 
 
 def _is_gpu(t: Optional[torch.Tensor]) -> bool:
-    # Direct path only valid on Linux where Vulkan and CUDA share the same VA.
-    return _DIRECT_GPU_OK and t is not None and t.is_cuda
+    """True when this tensor can be passed to Vulkan dispatch without staging.
+
+    Linux (ROCm): Vulkan and HIP share the same VA — data_ptr() is usable directly.
+    Windows: only true if the tensor was allocated via our custom allocator and
+    has a registered zero-copy VkBuffer (checked via vkflame_buf_from_hip_ptr).
+    """
+    if t is None:
+        return False
+    if not t.is_cuda:
+        return False
+    if _DIRECT_GPU_OK:  # Linux: all CUDA tensors are directly usable
+        return True
+    # Windows: check if a zero-copy VkBuffer was registered for this HIP address
+    rt, _ = _ensure_runtime()
+    if not hasattr(rt, 'vkflame_buf_from_hip_ptr'):
+        return False
+    return bool(rt.vkflame_buf_from_hip_ptr(ctypes.c_uint64(t.data_ptr())))
 
 
 @contextmanager
@@ -159,7 +187,7 @@ def _staged(
     """
     # ── (1) Linux direct path ──────────────────────────────────────────────
     use_direct = all(_is_gpu(t) for t in inputs if t is not None) and _is_gpu(output)
-    if use_direct:
+    if use_direct and not _WINDOWS:
         in_args = [
             ctypes.c_void_p(t.data_ptr()) if t is not None else ctypes.c_void_p(0)
             for t in inputs
@@ -168,55 +196,31 @@ def _staged(
         return
 
     # ── (2) Windows zero-copy via VK_KHR_external_memory_win32 ────────────
-    # IMPORTANT: hipIpcGetMemHandle on PyTorch's caching-allocator memory
-    # returns hipSuccess but a handle that triggers VK_ERROR_DEVICE_LOST
-    # (GPU reset) inside vkAllocateMemory.  Only enable when the caller has
-    # verified their allocations with VKFLAME_WIN32_ZEROCOPY=1.
-    _WIN32_ZEROCOPY = os.environ.get("VKFLAME_WIN32_ZEROCOPY") == "1"
-    if (_WIN32_ZEROCOPY
-            and _WINDOWS
-            and hasattr(rt, 'vkflame_wrap_hip_ptr')
-            and all(t is None or t.is_cuda for t in inputs)
-            and output.is_cuda):
-        wrapped_in: list[Optional[ctypes.c_void_p]] = []
-        ok = True
-        for t in inputs:
-            if t is None:
-                wrapped_in.append(None)
-            else:
-                wp = rt.vkflame_wrap_hip_ptr(
-                    ctypes.c_void_p(t.data_ptr()), ctypes.c_size_t(t.nbytes))
-                if not wp:
-                    ok = False
-                    break
-                wrapped_in.append(ctypes.c_void_p(wp))
-        if ok:
-            out_wp = rt.vkflame_wrap_hip_ptr(
-                ctypes.c_void_p(output.data_ptr()),
-                ctypes.c_size_t(output.nbytes))
-            if out_wp:
-                try:
-                    in_args = [
-                        ctypes.c_void_p(int(rt.vkflame_buf_address(w)))
-                        if w is not None else ctypes.c_void_p(0)
-                        for w in wrapped_in
-                    ]
-                    yield in_args, ctypes.c_void_p(
-                        int(rt.vkflame_buf_address(ctypes.c_void_p(out_wp))))
-                finally:
-                    for w in wrapped_in:
-                        if w is not None:
-                            rt.vkflame_free(w)
-                    rt.vkflame_free(ctypes.c_void_p(out_wp))
-                return
-        # clean up any wrappers allocated before the failure
-        for w in wrapped_in:
-            if w is not None:
-                rt.vkflame_free(w)
-        if _DEBUG:
-            import sys
-            print("[vkflame] Win32 zero-copy failed, falling to staging",
-                  file=sys.stderr)
+    # Enabled when all tensors were allocated via vkflame_pytorch_malloc  
+    # (registered in g_hip_ptr_map) — those are top-level WDDM resources
+    # that hipMemGetExportHandle can process without triggering device lost.
+    _all_gpu = (all(t is None or _is_gpu(t) for t in inputs) and _is_gpu(output))
+    if (_WINDOWS
+            and _all_gpu
+            and hasattr(rt, 'vkflame_buf_from_hip_ptr')):
+        # All inputs/output have registered VkBuffers — use their device addresses directly.
+        # vkflame_buf_from_hip_ptr(hip_ptr) → Vulkan device address (uint64)
+        try:
+            in_args = []
+            for t in inputs:
+                if t is None:
+                    in_args.append(ctypes.c_void_p(0))
+                else:
+                    vk_addr = rt.vkflame_buf_from_hip_ptr(ctypes.c_uint64(t.data_ptr()))
+                    in_args.append(ctypes.c_void_p(int(vk_addr)))
+            out_vk_addr = rt.vkflame_buf_from_hip_ptr(ctypes.c_uint64(output.data_ptr()))
+            yield in_args, ctypes.c_void_p(int(out_vk_addr))
+            return
+        except Exception as _e:
+            if _DEBUG:
+                import sys
+                print(f"[vkflame] Win32 zero-copy lookup failed: {_e}, falling to staging",
+                      file=sys.stderr)
 
     # ── (3) Staged fallback ────────────────────────────────────────────────
     in_bufs: list[Optional[_VulkanBuf]] = []

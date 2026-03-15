@@ -556,13 +556,10 @@ def main() -> None:
     print(f"  ROCm   : {rocm_ver}")
     print(f"  vkflame: {'YES' if _vkflame_available else 'NO (ROCm-only mode)'}")
     if _vkflame_available and sys.platform == "win32":
-        print("  NOTE: Windows -- VKF timings include CPU<->Vulkan staging cost")
-        print("        (HIP and Vulkan use separate VA spaces on Windows WDDM).")
-        print("  STATUS: PRELIMINARY -- kernels correct, Windows overhead not yet zero-copy.")
-        print("  BLOCKER: hipIpcGetMemHandle on PyTorch caching-allocator memory returns")
-        print("           hipSuccess but triggers VK_ERROR_DEVICE_LOST in vkAllocateMemory.")
-        print("           Enable opt-in with VKFLAME_WIN32_ZEROCOPY=1 once allocator is patched.")
-        print("  PATH: vkflame_wrap_hip_ptr (VK_KHR_external_memory_win32) is implemented;")
+        print("  NOTE: Windows -- VKF timings use CPU-bounce staging (upload+download).")
+        print("        Range-lookup in vkflame_buf_from_ptr handles PyTorch sub-allocations.")
+        print("        STATUS: staging correctness verified; zero-copy planned via")
+        print("                hipExtMallocWithFlags + hipMemGetExportHandle.")
     print("=" * 80)
 
     # All perf benchmarks

@@ -2,6 +2,7 @@
 #include "device.h"
 #include <cstring>
 #include <cstdio>
+#include <map> // sorted — needed for upper_bound range lookup
 #include <unordered_map>
 #include <mutex>
 #include <memory>
@@ -27,7 +28,11 @@
         }                                                       \
     } while (0)
 
-static std::unordered_map<VkDeviceAddress, VKFBuffer *> g_ptr_map;
+// Sorted map: key = buffer base address, value = VKFBuffer*.
+// Using std::map so we can do upper_bound() range lookups for
+// PyTorch sub-allocations (base_ptr + offset) that don't land exactly
+// on the registered base address.
+static std::map<VkDeviceAddress, VKFBuffer *> g_ptr_map;
 static std::mutex g_ptr_map_mutex;
 
 static constexpr size_t ALIGN = 256;
@@ -163,10 +168,34 @@ extern "C"
 
     VKFBuffer *vkflame_buf_from_ptr(void *ptr)
     {
+        if (!ptr)
+            return nullptr;
         VkDeviceAddress addr = (VkDeviceAddress)(uintptr_t)ptr;
         std::lock_guard<std::mutex> lock(g_ptr_map_mutex);
-        auto it = g_ptr_map.find(addr);
-        return (it != g_ptr_map.end()) ? it->second : nullptr;
+
+        // Fast exact hit — covers the common case (staging buffers, Linux direct).
+        auto exact = g_ptr_map.find(addr);
+        if (exact != g_ptr_map.end())
+        {
+            exact->second->current_offset = 0;
+            return exact->second;
+        }
+
+        // Range lookup: find the largest registered base address <= addr.
+        // Handles PyTorch caching-allocator sub-allocations where the tensor
+        // data_ptr() is base_ptr + some offset, but only base_ptr is registered.
+        auto it = g_ptr_map.upper_bound(addr); // first entry > addr
+        if (it == g_ptr_map.begin())
+            return nullptr; // addr is below every registered buffer
+        --it;
+
+        VKFBuffer *buf = it->second;
+        VkDeviceAddress base = it->first;
+        if (addr < base || addr >= base + (VkDeviceAddress)buf->size)
+            return nullptr; // addr is above this buffer's end
+
+        buf->current_offset = (size_t)(addr - base);
+        return buf;
     }
 
     uint64_t vkflame_buf_address(VKFBuffer *buf)
@@ -351,20 +380,40 @@ extern "C"
     }
 
 #ifdef _WIN32
+    // ── Win32 per-VA-space HIP→Vulkan wrapper map ─────────────────────────
+    // Maps HIP device pointer (uint64_t) → VKFBuffer* for allocations made
+    // via vkflame_pytorch_malloc so that _staged() can skip staging.
+    static std::unordered_map<uint64_t, VKFBuffer *> g_hip_ptr_map;
+    static std::mutex g_hip_ptr_mutex;
+
+    // ── Lazy-load the REAL ROCm hip runtime (not our shim) ────────────────
+    // We use the versioned "amdhip64_7.dll" which is the actual ROCm library.
+    // Avoid "amdhip64.dll" — that's our shim, causing circular dependencies.
+    static HMODULE s_real_hip_dll = nullptr;
+    static std::once_flag s_hip_dll_flag;
+
+    static HMODULE get_real_hip_dll()
+    {
+        std::call_once(s_hip_dll_flag, []()
+                       {
+            // Try versioned name first — this is the real ROCm runtime DLL.
+            s_real_hip_dll = LoadLibraryA("amdhip64_7.dll");
+            if (!s_real_hip_dll)
+            {
+                // Last resort: search by full ROCm install path.
+                s_real_hip_dll = LoadLibraryA(
+                    "C:\\Program Files\\AMD\\ROCm\\7.1\\bin\\amdhip64_7.dll");
+            } });
+        return s_real_hip_dll;
+    }
+
     // ── Win32 zero-copy: wrap a HIP device pointer in a VkBuffer ──────────
     //
-    // Flow:
-    //   1. hipIpcGetMemHandle(hip_ptr) → 64-byte opaque blob.
-    //      On AMD ROCm/Windows (WDDM), the first sizeof(HANDLE) bytes
-    //      encode the Win32 KMT (Kernel-Mode Thunk) handle for the
-    //      underlying D3D/KMD allocation.
-    //   2. VkImportMemoryWin32HandleInfoKHR  pNext'd into vkAllocateMemory
-    //      imports that KMT handle — same physical pages, zero staging.
-    //   3. VkBuffer bound to the imported VkDeviceMemory.
-    //   4. vkGetBufferDeviceAddress → usable as dispatch argument.
+    // Correct API for same-process Vulkan interop: hipMemGetExportHandle
+    // (NOT hipIpcGetMemHandle which is for inter-process sharing and fails
+    // on caching-allocator sub-allocations with VK_ERROR_DEVICE_LOST).
     //
-    // Returns NULL if the extension is absent or the handle export fails
-    // (e.g. PyTorch sub-allocates inside a larger pool allocation).
+    // Returns NULL if the extension is absent or the export fails.
     // Callers must fall back to the staging path on NULL.
     //
     // Freeing a wrapped buffer (is_wrapped == true):
@@ -378,36 +427,34 @@ extern "C"
             return nullptr;
 
         // ── Step 1: export HIP allocation as Win32 KMT handle ──────────
-        // Load hipIpcGetMemHandle at runtime to avoid a circular link
-        // dependency (amdhip64.dll shim already links against vkflame_rt).
-        using PFN_hipIpcGetMemHandle = int (*)(void *, void *);
-        static PFN_hipIpcGetMemHandle pfn_hipIpcGetMemHandle = nullptr;
-        if (!pfn_hipIpcGetMemHandle)
+        // hipMemGetExportHandle is the correct same-process export API.
+        // hipMemHandleTypeWin32KMT = 1 (from ROCm headers).
+        // Signature: hipError_t hipMemGetExportHandle(void* handle,
+        //                void* dev_ptr, hipMemRangeHandleType, unsigned long long)
+        using PFN_hipMemGetExportHandle = int (*)(void *, const void *, int, unsigned long long);
+        static PFN_hipMemGetExportHandle pfn_hipMemGetExportHandle = nullptr;
+        if (!pfn_hipMemGetExportHandle)
         {
-            HMODULE hip_dll = LoadLibraryA("amdhip64.dll");
-            if (!hip_dll)
-                hip_dll = LoadLibraryA("amdhip64_7.dll");
+            HMODULE hip_dll = get_real_hip_dll();
             if (hip_dll)
-                pfn_hipIpcGetMemHandle =
-                    (PFN_hipIpcGetMemHandle)GetProcAddress(hip_dll, "hipIpcGetMemHandle");
+                pfn_hipMemGetExportHandle =
+                    (PFN_hipMemGetExportHandle)GetProcAddress(
+                        hip_dll, "hipMemGetExportHandle");
         }
-        if (!pfn_hipIpcGetMemHandle)
+        if (!pfn_hipMemGetExportHandle)
+        {
+            fprintf(stderr, "[vkflame] hipMemGetExportHandle not found in real HIP dll\n");
             return nullptr;
+        }
 
-        // hipIpcMemHandle_t is a 64-byte opaque blob; use a plain char array
-        // so we don't need the HIP struct definition for the IPC part.
-        char ipc_blob[64] = {};
-        int hip_err = pfn_hipIpcGetMemHandle(ipc_blob, hip_ptr);
+        HANDLE kmt_handle = nullptr;
+        // hipMemHandleTypeWin32KMT = 1
+        int hip_err = pfn_hipMemGetExportHandle(&kmt_handle, hip_ptr, 1, 0);
         if (hip_err != 0 /* hipSuccess */)
         {
-            // Not every allocation is IPC-exportable (e.g. PyTorch caching
-            // allocator sub-allocations).  Fail silently; caller stages.
+            // Allocation is not exportable — caller should stage.
             return nullptr;
         }
-        // On AMD ROCm/Windows (WDDM), the first sizeof(HANDLE) bytes of the
-        // IPC blob contain the Win32 KMT handle for the underlying allocation.
-        HANDLE kmt_handle = 0;
-        memcpy(&kmt_handle, ipc_blob, sizeof(HANDLE));
         if (!kmt_handle)
             return nullptr;
 
@@ -494,6 +541,137 @@ extern "C"
         }
         return buf;
     }
+
+    // ── Exportable HIP allocator — allocates memory that hipMemGetExportHandle
+    // can handle (top-level WDDM resource, not a caching-allocator slice). ──
+    //
+    // Called by vkflame_pytorch_malloc and by hipMalloc shim (step 3 of plan).
+    // Returns a real HIP device pointer, or nullptr on failure.
+
+    void *vkflame_hip_alloc_exportable(size_t size)
+    {
+        // hipExtMallocWithFlags(ptr, size, hipDeviceMallocDefault=0)
+        // creates a device allocation that is a true top-level WDDM resource.
+        using PFN_hipExtMallocWithFlags = int (*)(void **, size_t, unsigned int);
+        static PFN_hipExtMallocWithFlags pfn = nullptr;
+        if (!pfn)
+        {
+            HMODULE hip_dll = get_real_hip_dll();
+            if (hip_dll)
+                pfn = (PFN_hipExtMallocWithFlags)GetProcAddress(
+                    hip_dll, "hipExtMallocWithFlags");
+        }
+        if (!pfn)
+        {
+            // Fallback: standard hipMalloc from real runtime
+            using PFN_hipMalloc = int (*)(void **, size_t);
+            static PFN_hipMalloc pfn_malloc = nullptr;
+            if (!pfn_malloc)
+            {
+                HMODULE hip_dll = get_real_hip_dll();
+                if (hip_dll)
+                    pfn_malloc = (PFN_hipMalloc)GetProcAddress(hip_dll, "hipMalloc");
+            }
+            if (!pfn_malloc)
+                return nullptr;
+            void *ptr = nullptr;
+            if (pfn_malloc(&ptr, size) != 0)
+                return nullptr;
+            return ptr;
+        }
+        void *ptr = nullptr;
+        if (pfn(&ptr, size, 0 /* hipDeviceMallocDefault */) != 0)
+            return nullptr;
+        return ptr;
+    }
+
+    void vkflame_hip_free_exportable(void *ptr)
+    {
+        if (!ptr)
+            return;
+        using PFN_hipFree = int (*)(void *);
+        static PFN_hipFree pfn = nullptr;
+        if (!pfn)
+        {
+            HMODULE hip_dll = get_real_hip_dll();
+            if (hip_dll)
+                pfn = (PFN_hipFree)GetProcAddress(hip_dll, "hipFree");
+        }
+        if (pfn)
+            pfn(ptr);
+    }
+
+    // ── PyTorch custom-allocator hooks ─────────────────────────────────────
+    // Signature exactly matches torch.cuda.memory.CUDAPluggableAllocator.
+    // PyTorch will call  vkflame_pytorch_malloc(nbytes, device, stream)
+    // and store the returned void* as tensor.data_ptr().
+    //
+    // Every allocation is an exportable HIP address that also has a zero-copy
+    // VkBuffer registered in g_hip_ptr_map.  When _staged() sees a CUDA tensor
+    // whose data_ptr() is in g_hip_ptr_map, it skips staging entirely.
+
+    void *vkflame_pytorch_malloc(size_t size, int /*device*/, void * /*stream*/)
+    {
+        if (size == 0)
+            return nullptr;
+
+        void *hip_ptr = vkflame_hip_alloc_exportable(size);
+        if (!hip_ptr)
+            return nullptr;
+
+        // Try to create a zero-copy VkBuffer over this allocation.
+        // If it fails we still return the valid HIP pointer — PyTorch can use
+        // the tensor, but _staged() will fall back to the staging path.
+        VKFBuffer *buf = vkflame_wrap_hip_ptr(hip_ptr, size);
+        if (buf)
+        {
+            std::lock_guard<std::mutex> lk(g_hip_ptr_mutex);
+            g_hip_ptr_map[(uint64_t)(uintptr_t)hip_ptr] = buf;
+        }
+        return hip_ptr;
+    }
+
+    void vkflame_pytorch_free(void *ptr, size_t /*size*/, int /*device*/, void * /*stream*/)
+    {
+        if (!ptr)
+            return;
+
+        VKFBuffer *buf = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(g_hip_ptr_mutex);
+            auto it = g_hip_ptr_map.find((uint64_t)(uintptr_t)ptr);
+            if (it != g_hip_ptr_map.end())
+            {
+                buf = it->second;
+                g_hip_ptr_map.erase(it);
+            }
+        }
+        // Release Vulkan view (does NOT free the HIP allocation).
+        if (buf)
+        {
+            VKFContext *ctx = vkflame_get_context();
+            if (ctx)
+            {
+                vkDestroyBuffer(ctx->device, buf->buffer, nullptr);
+                vkFreeMemory(ctx->device, buf->memory, nullptr);
+            }
+            delete buf;
+        }
+        // Free the actual HIP allocation via the real runtime.
+        vkflame_hip_free_exportable(ptr);
+    }
+
+    // VkBuffer device-address lookup for a HIP data_ptr().
+    // Returns 0 if not found (caller should stage).
+    uint64_t vkflame_buf_from_hip_ptr(uint64_t hip_ptr)
+    {
+        std::lock_guard<std::mutex> lk(g_hip_ptr_mutex);
+        auto it = g_hip_ptr_map.find(hip_ptr);
+        if (it == g_hip_ptr_map.end())
+            return 0;
+        return (uint64_t)it->second->address;
+    }
+
 #endif // _WIN32
 
 } // extern "C"

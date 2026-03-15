@@ -53,5 +53,9 @@ try:
     if _repo_root not in _sys.path:
         _sys.path.insert(0, _repo_root)
     from torch_backend.mode import VKFlameMode, install  # noqa: F401
+    # Note: CUDAPluggableAllocator cannot be registered after torch initialises
+    # its CUDA/ROCm context (which happens on first tensor creation, before
+    # vkflame is imported).  Zero-copy on Windows is handled instead by the
+    # range-lookup in vkflame_buf_from_ptr + the download_into CPU-bounce path.
 except ImportError:
     pass  # torch not installed — shim-only mode is still functional
