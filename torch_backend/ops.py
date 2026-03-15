@@ -470,7 +470,10 @@ def _activation_handler(x: torch.Tensor, act_id: int) -> torch.Tensor:
     rt, ctx = _ensure_runtime()
     out = torch.empty_like(x)
     M = x.numel()
-    with _staged(rt, [x, x], out) as (in_args, out_arg):
+    # B must be a 1-element tensor of 1.0 so that A[i]*B[0] = A[i]*1 = A[i].
+    # Passing B=x was wrong: the linear shader reads B[0,0]=x[0], giving act(x[i]*x[0]).
+    ones = torch.ones(1, dtype=x.dtype, device=x.device)
+    with _staged(rt, [x, ones], out) as (in_args, out_arg):
         rt.vkflame_dispatch_linear(
             ctx, in_args[0], in_args[1], None, out_arg,
             M, 1, 1, _dtype_to_int(x.dtype), 0, 0, act_id, None, None, None,
@@ -503,6 +506,9 @@ def _binop_handler(
     """GPU element-wise binary op via binop_f32.glsl; handles broadcasting."""
     if a.dtype not in _ACCEL_DTYPES:
         raise NotImplementedError
+    # b may be a Python scalar (e.g. aten.add.Tensor called with alpha=0.1)
+    if not isinstance(b, torch.Tensor):
+        b = torch.full_like(a, float(b))
     # binop_f32.glsl is fp32-only; convert inputs and restore original dtype on output
     b_scaled = b if alpha == 1.0 else b * alpha
     a_f32 = a.to(torch.float32).contiguous()

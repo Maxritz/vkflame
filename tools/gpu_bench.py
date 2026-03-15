@@ -198,7 +198,7 @@ def _bench_op(
 # ══════════════════════════════════════════════════════════════════
 
 def bench_gemm_fp16() -> None:
-    print("\n── FP16 GEMM (torch.mm) ─────────────────────────────────")
+    print("\n== FP16 GEMM (torch.mm) ====================")
     _print_header()
     shapes = [
         (256,  256,  256),
@@ -220,7 +220,7 @@ def bench_gemm_fp16() -> None:
 
 
 def bench_gemm_batched() -> None:
-    print("\n── Batched FP16 GEMM (torch.bmm) ───────────────────────")
+    print("\n== Batched FP16 GEMM (torch.bmm) ===========")
     _print_header()
     shapes = [
         (4,  1024, 1024, 1024),
@@ -238,7 +238,7 @@ def bench_gemm_batched() -> None:
 
 
 def bench_flash_attention() -> None:
-    print("\n── Flash Attention (scaled_dot_product_attention) ───────")
+    print("\n== Flash Attention (scaled_dot_product_attention) ==")
     _print_header()
     configs = [
         # (B, Hq, Hkv, Sq, Skv, D,  causal)
@@ -280,7 +280,7 @@ def bench_flash_attention() -> None:
 
 
 def bench_rms_norm() -> None:
-    print("\n── RMS Norm ─────────────────────────────────────────────")
+    print("\n== RMS Norm =========================")
     _print_header()
     shapes = [(32, 4096), (32, 8192), (32, 32768), (128, 4096)]
     for M, N in shapes:
@@ -294,7 +294,7 @@ def bench_rms_norm() -> None:
 
 
 def bench_softmax() -> None:
-    print("\n── Softmax ──────────────────────────────────────────────")
+    print("\n== Softmax =========================")
     _print_header()
     shapes = [(1, 32000), (32, 32000), (32, 128000), (128, 32000)]
     for M, N in shapes:
@@ -306,7 +306,7 @@ def bench_softmax() -> None:
 
 
 def bench_activations() -> None:
-    print("\n── Activations (element-wise unary) ─────────────────────")
+    print("\n== Activations (element-wise unary) =========")
     _print_header()
     N = 4096 * 32
     acts = [
@@ -321,7 +321,7 @@ def bench_activations() -> None:
 
 
 def bench_binops() -> None:
-    print("\n── Element-wise Binary Ops ──────────────────────────────")
+    print("\n== Element-wise Binary Ops ==========")
     _print_header()
     N = 4096 * 128
     ops_list = [
@@ -339,7 +339,7 @@ def bench_binops() -> None:
 
 
 def bench_topk() -> None:
-    print("\n── Top-K Sampling ───────────────────────────────────────")
+    print("\n== Top-K Sampling ===================")
     _print_header()
     configs = [(1, 32000, 50), (32, 32000, 50), (1, 128000, 100)]
     for M, N, K in configs:
@@ -351,7 +351,7 @@ def bench_topk() -> None:
 
 
 def bench_embedding() -> None:
-    print("\n── Embedding Lookup ─────────────────────────────────────")
+    print("\n== Embedding Lookup =================")
     _print_header()
     # On Windows, staging 262+ MB weight matrices per-iteration is very slow
     # (100% staging overhead until Win32 zero-copy lands).  Use smaller
@@ -376,7 +376,7 @@ def bench_transformer_layer() -> None:
       x → RMSNorm → QKV proj → flash_attn → out_proj → RMSNorm → gate+up → SiLU → down
     Sizes match a ~7B model (hidden=4096, heads=32, kv_heads=8, ffn=14336).
     """
-    print("\n── Full Transformer Layer (7B config, bs=1, seq=512) ─────")
+    print("\n== Full Transformer Layer (7B config, bs=1, seq=512) ==")
     _print_header()
 
     H  = 4096
@@ -572,7 +572,11 @@ def main() -> None:
     bench_binops()
     bench_topk()
     bench_embedding()
-    bench_transformer_layer()
+    try:
+        bench_transformer_layer()
+    except Exception as _e:
+        print(f"[CRASH] bench_transformer_layer: {type(_e).__name__}: {_e}")
+        import traceback; traceback.print_exc()
 
     # Correctness
     correctness_checks()
